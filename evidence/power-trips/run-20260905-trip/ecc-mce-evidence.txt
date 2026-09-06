@@ -1,0 +1,28 @@
+# ECC / MCE evidence for Instance 4 trip (2026-09-05 ~16:32 local)
+# Sourced from: journalctl -k -b -1 | grep -iE 'mce|edac|ce|thermal|sync flood'
+# (previous boot = the boot in which the model load ran and tripped)
+
+Sep 05 13:18:22 pensive kernel: EDAC amd64: MC: 0: 65536MB 1: 65536MB
+Sep 05 13:18:22 pensive kernel: EDAC amd64: MC: 2:     0MB 3:     0MB
+Sep 05 13:18:22 pensive kernel: EDAC MC: UMC4 chip selects:
+Sep 05 13:18:22 pensive kernel: EDAC amd64: MC: 0: 65536MB 1: 65536MB
+Sep 05 13:18:22 pensive kernel: EDAC amd64: MC: 2:     0MB 3:     0MB
+Sep 05 13:18:22 pensive kernel: EDAC MC: UMC5 chip selects:
+Sep 05 13:18:22 pensive kernel: EDAC amd64: MC: 0: 65536MB 1: 65536MB
+Sep 05 13:18:22 pensive kernel: EDAC amd64: MC: 2:     0MB 3:     0MB
+Sep 05 13:18:22 pensive kernel: EDAC MC: UMC6 chip selects:
+Sep 05 13:18:22 pensive kernel: EDAC amd64: MC: 0: 65536MB 1: 65536MB
+Sep 05 13:18:22 pensive kernel: EDAC amd64: MC: 2:     0MB 3:     0MB
+Sep 05 13:18:22 pensive kernel: EDAC MC: UMC7 chip selects:
+Sep 05 13:18:22 pensive kernel: EDAC amd64: MC: 0: 65536MB 1: 65536MB
+Sep 05 13:18:22 pensive kernel: EDAC amd64: MC: 2:     0MB 3:     0MB
+Sep 05 15:07:31 pensive kernel: mce: [Hardware Error]: Machine check events logged
+Sep 05 15:07:31 pensive kernel: EDAC MC0: 1 CE on mc#0csrow#0channel#6 (csrow:0 channel:6 page:0x13e0d0e7 offset:0x9c0 grain:64 syndrome:0x457)
+Sep 05 15:37:00 pensive kernel: mce: [Hardware Error]: Machine check events logged
+Sep 05 15:37:00 pensive kernel: EDAC MC0: 1 CE on mc#0csrow#0channel#6 (csrow:0 channel:6 page:0x10018cec offset:0x6c0 grain:64 syndrome:0x438a)
+Sep 05 16:11:57 pensive kernel: mce: [Hardware Error]: Machine check events logged
+Sep 05 16:11:57 pensive kernel: EDAC MC0: 1 CE on mc#0csrow#0channel#6 (csrow:0 channel:6 page:0x10381aec offset:0x140 grain:64 syndrome:0x3aeb)
+
+# Reset reason (grep Previous system reset /var/log/syslog)
+2026-09-05T16:32:20.091642-07:00 pensive kernel: x86/amd: Previous system reset reason [0x08000a00]: internal CPU thermal limit was tripped
+2026-09-05T16:32:20.091643-07:00 pensive kernel: x86/amd: Previous system reset reason [0x08000a00]: an uncorrected error caused a data fabric sync flood event

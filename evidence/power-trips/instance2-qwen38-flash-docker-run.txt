@@ -1,0 +1,96 @@
+(APIServer pid=1) INFO 09-05 20:14:33 [api_utils.py:333] 
+(APIServer pid=1) INFO 09-05 20:14:33 [api_utils.py:333]        █     █     █▄   ▄█
+(APIServer pid=1) INFO 09-05 20:14:33 [api_utils.py:333]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.1.dev20073+g8e685d198
+(APIServer pid=1) INFO 09-05 20:14:33 [api_utils.py:333]   █▄█▀ █     █     █     █  model   /model
+(APIServer pid=1) INFO 09-05 20:14:33 [api_utils.py:333]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=1) INFO 09-05 20:14:33 [api_utils.py:333] 
+(APIServer pid=1) INFO 09-05 20:14:33 [api_utils.py:272] non-default args: {'model_tag': '/model', 'model': '/model', 'trust_remote_code': True, 'max_model_len': 262144, 'quantization': 'modelopt', 'reasoning_parser': 'qwen3', 'tensor_parallel_size': 2, 'gpu_memory_utilization': 0.9, 'enable_prefix_caching': True, 'max_num_seqs': 256, 'enable_flashinfer_autotune': False}
+(APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(APIServer pid=1) INFO 09-05 20:14:49 [model.py:672] Resolved architecture: Qwen4ExpForConditionalGeneration
+(APIServer pid=1) INFO 09-05 20:14:49 [model.py:1965] Using max model len 262144
+(APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(APIServer pid=1) [ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /usr/local/lib/python3.12/dist-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(APIServer pid=1) [ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /usr/local/lib/python3.12/dist-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(APIServer pid=1) INFO 09-05 20:14:52 [scheduler.py:246] Chunked prefill is enabled with max_num_batched_tokens=8192.
+(APIServer pid=1) INFO 09-05 20:14:52 [config.py:605] Mamba cache mode is set to 'align' for Qwen4ExpForConditionalGeneration by default when prefix caching is enabled
+(APIServer pid=1) WARNING 09-05 20:14:52 [modelopt.py:378] Detected ModelOpt fp8 checkpoint (quant_algo=FP8). Please note that the format is experimental and could change.
+(APIServer pid=1) WARNING 09-05 20:14:52 [modelopt.py:1011] Detected ModelOpt NVFP4 checkpoint (quant_algo=NVFP4). Please note that the format is experimental and could change in future.
+(APIServer pid=1) WARNING 09-05 20:14:52 [modelopt.py:1011] Detected ModelOpt NVFP4 checkpoint (quant_algo=W4A16_NVFP4). Please note that the format is experimental and could change in future.
+(APIServer pid=1) WARNING 09-05 20:14:52 [modelopt.py:1675] Detected ModelOpt MXFP8 checkpoint. Please note that the format is experimental and could change in future.
+(APIServer pid=1) INFO 09-05 20:14:52 [kernel.py:308] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(APIServer pid=1) [transformers] The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(APIServer pid=1) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(EngineCore pid=769) INFO 09-05 20:15:11 [core.py:122] Initializing a V1 LLM engine (v0.1.dev20073+g8e685d198) with config: model='/model', speculative_config=None, tokenizer='/model', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=262144, download_dir=None, load_format=auto, tensor_parallel_size=2, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=False, quantization=modelopt_mixed, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=cuda, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='qwen3', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=/model, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'ir_enable_torch_wrap': True, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::qwen3_8_flash_next_ple_short_conv', 'vllm::qwen3_8_flash_next_qsa_with_output', 'vllm::linear_attention', 'vllm::qwen_gdn_attention_core', 'vllm::qwen_gdn_attention_core_fused_norm_packed', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::hpc_rope_norm_forward', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2, 1)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256, 272, 288, 304, 320, 336, 352, 368, 384, 400, 416, 432, 448, 464, 480, 496, 512], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'enable_qk_norm_rope_fusion': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False, 'fuse_qk_norm_rope_kvcache': False}, 'max_cudagraph_capture_size': 512, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native']), enable_flashinfer_autotune=False, enable_cutedsl_warmup=True, enable_jit_warmup=True, enable_bf16x3_router_gemm=False, moe_backend='auto', linear_backend='auto')
+(EngineCore pid=769) INFO 09-05 20:15:11 [multiproc_executor.py:150] DP group leader: node_rank=0, node_rank_within_dp=0, master_addr=127.0.0.1, mq_connect_ip=172.17.0.2 (local), world_size=2, local_world_size=2
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_section', 'mrope_interleaved'}
+[ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /usr/local/lib/python3.12/dist-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+[ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /usr/local/lib/python3.12/dist-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(Worker pid=1015) INFO 09-05 20:15:23 [parallel_state.py:1638] world_size=2 rank=0 local_rank=0 distributed_init_method=file:///tmp/vllm_dist_4849997f6160403e8a080b5a7bf824fc backend=nccl
+[ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /usr/local/lib/python3.12/dist-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+[ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /usr/local/lib/python3.12/dist-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(Worker pid=1016) INFO 09-05 20:15:23 [parallel_state.py:1638] world_size=2 rank=1 local_rank=1 distributed_init_method=file:///tmp/vllm_dist_4849997f6160403e8a080b5a7bf824fc backend=nccl
+(Worker pid=1015) INFO 09-05 20:15:23 [pynccl.py:113] vLLM is using nccl==2.30.7
+(Worker pid=1015) WARNING 09-05 20:15:24 [symm_mem.py:67] SymmMemCommunicator: Device capability 12.0 not supported, communicator is not available.
+(Worker pid=1016) WARNING 09-05 20:15:24 [symm_mem.py:67] SymmMemCommunicator: Device capability 12.0 not supported, communicator is not available.
+(Worker pid=1015) INFO 09-05 20:15:24 [cuda_communicator.py:266] Using ['CUSTOM', 'PYNCCL'] all-reduce backends (in dispatch order) for group 'tp:0' out of potential backends: ['NCCL_SYMM_MEM', 'QUICK_REDUCE', 'FLASHINFER', 'AITER_CUSTOM', 'CUSTOM', 'SYMM_MEM', 'PYNCCL'].
+(Worker pid=1015) INFO 09-05 20:15:24 [cuda_communicator.py:266] Using ['PYNCCL'] all-reduce backends (in dispatch order) for group 'ep:0' out of potential backends: ['NCCL_SYMM_MEM', 'QUICK_REDUCE', 'FLASHINFER', 'AITER_CUSTOM', 'CUSTOM', 'SYMM_MEM', 'PYNCCL'].
+(Worker pid=1015) INFO 09-05 20:15:24 [parallel_state.py:1982] rank 0 in world size 2 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank 0, EPLB rank N/A
+(Worker pid=1015) INFO 09-05 20:15:24 [gpu_worker.py:500] Using V2 Model Runner
+(Worker pid=1015) INFO 09-05 20:15:24 [gpu_worker.py:270] PleOffload: spawning worker (rank=0, local_rank=0, dp_size=1, tp_size=2, num_workers=2, ipc_addr=ipc:///tmp/bf0137a9-9154-4eec-956b-cd1aea07311d).
+(Worker_TP0 pid=1015) INFO 09-05 20:15:25 [model_runner.py:385] Loading model from scratch...
+(Worker_TP0 pid=1015) INFO 09-05 20:15:25 [cuda.py:545] Using backend AttentionBackendEnum.FLASH_ATTN for vit attention
+(Worker_TP0 pid=1015) INFO 09-05 20:15:25 [mm_encoder_attention.py:375] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention.
+(Worker_TP0 pid=1015) INFO 09-05 20:15:25 [qwen_gdn_linear_attn.py:158] Using Triton/FLA GDN prefill kernel (requested=auto, head_k_dim=128).
+(Worker_TP0 pid=1015) INFO 09-05 20:15:25 [qwen_gdn_linear_attn.py:505] GDN decode kernel: cuda
+(Worker_TP0 pid=1015) INFO 09-05 20:15:25 [nvfp4.py:291] Using 'FLASHINFER_CUTLASS' NvFp4 MoE backend out of potential backends: ['FLASHINFER_TRTLLM', 'FLASHINFER_CUTEDSL', 'FLASHINFER_CUTEDSL_BATCHED', 'FLASHINFER_CUTLASS', 'VLLM_CUTLASS', 'MARLIN', 'HUMMING', 'EMULATION'].
+(Worker_TP0 pid=1015) INFO 09-05 20:15:25 [flash_attn.py:911] Using FlashAttention version 2
+(Worker_TP0 pid=1015) INFO 09-05 20:15:26 [weight_utils.py:866] Filesystem type for checkpoints: ZFS. Checkpoint size: 123.57 GiB. Available RAM: 320.40 GiB.
+(Worker_TP0 pid=1015) INFO 09-05 20:15:26 [weight_utils.py:889] Auto-prefetch is disabled because the filesystem (ZFS) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
+(Worker_TP0 pid=1015) Loading safetensors checkpoint shards:   0% Completed | 0/11 [00:00<?, ?it/s]
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:34 [parallel_state.py:1638] world_size=1 rank=0 local_rank=0 distributed_init_method=file:///tmp/vllm_ple_offload_ynpn_gvj/store backend=gloo
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:35 [scheduler.py:246] Chunked prefill is enabled with max_num_batched_tokens=2048.
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:35 [kernel.py:308] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:35 [parallel_state.py:1982] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank 0, EPLB rank N/A
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:35 [worker.py:158] Distributed environment initialized (backend=gloo, rank=0, world_size=1).
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:35 [worker.py:365] Initializing model structure for PLE weight discovery ...
+(PleOffloadWorker pid=1832) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(PleOffloadWorker pid=1832) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(PleOffloadWorker pid=1832) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(PleOffloadWorker pid=1832) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(PleOffloadWorker pid=1832) [transformers] Unrecognized keys in `rope_parameters` for 'rope_type'='default': {'mrope_interleaved', 'mrope_section'}
+(PleOffloadWorker pid=1832) [ERROR] `min_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /usr/local/lib/python3.12/dist-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(PleOffloadWorker pid=1832) [ERROR] `max_frames` is part of Qwen3VLVideoProcessorInitKwargs, but not documented. Make sure to add it to the docstring of the function in /usr/local/lib/python3.12/dist-packages/transformers/models/qwen3_vl/video_processing_qwen3_vl.py.
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:36 [cuda.py:545] Using backend AttentionBackendEnum.FLASH_ATTN for vit attention
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:36 [mm_encoder_attention.py:375] Using AttentionBackendEnum.FLASH_ATTN for MMEncoderAttention.
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:36 [qwen_gdn_linear_attn.py:158] Using Triton/FLA GDN prefill kernel (requested=auto, head_k_dim=128).
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:36 [qwen_gdn_linear_attn.py:505] GDN decode kernel: cuda
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:36 [nvfp4.py:291] Using 'FLASHINFER_CUTLASS' NvFp4 MoE backend out of potential backends: ['FLASHINFER_TRTLLM', 'FLASHINFER_CUTEDSL', 'FLASHINFER_CUTEDSL_BATCHED', 'FLASHINFER_CUTLASS', 'VLLM_CUTLASS', 'MARLIN', 'HUMMING', 'EMULATION'].
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:36 [flash_attn.py:911] Using FlashAttention version 2
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:37 [worker.py:385] Found 1 PleOffloadLayer(s): ['language_model.model.layers.1.ple.ple_embedding']
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:37 [weight_utils.py:866] Filesystem type for checkpoints: ZFS. Checkpoint size: 123.57 GiB. Available RAM: 319.84 GiB.
+(PleOffloadWorker pid=1832) INFO 09-05 20:15:37 [weight_utils.py:889] Auto-prefetch is disabled because the filesystem (ZFS) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
+(PleOffloadWorker pid=1832) Loading safetensors checkpoint shards(PLE-offload):   0% Completed | 0/11 [00:00<?, ?it/s]
+(PleOffloadWorker pid=1832) Loading safetensors checkpoint shards(PLE-offload):   9% Completed | 1/11 [00:00<00:03,  3.00it/s]
+(Worker_TP0 pid=1015) Loading safetensors checkpoint shards:   9% Completed | 1/11 [00:12<02:03, 12.36s/it]
+(PleOffloadWorker pid=1832) Loading safetensors checkpoint shards(PLE-offload):  18% Completed | 2/11 [00:02<00:12,  1.34s/it]
+(PleOffloadWorker pid=1832) Loading safetensors checkpoint shards(PLE-offload):  27% Completed | 3/11 [00:04<00:13,  1.71s/it]
