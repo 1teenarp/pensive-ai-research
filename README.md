@@ -1,122 +1,134 @@
-# System Capability Diagnostic — LLM Inference
+# pensive-ai-research
 
-Date: 2026-09-03
-Scope: hardware/inference-capability assessment to inform what models can be run locally, and (in follow-up) a move away from llama.cpp to a different provider.
+**A living knowledge base for a single-socket EPYC workstation ("pensive") used to run and study
+large local LLMs with hosted NVIDIA Blackwell GPUs** — serving, hardware debugging, self-built AI
+tooling, and the engineering journey around running frontier models on consumer-grade hardware.
+
+This repo documents **what the machine is, what models it runs (and how), what has failed and why,
+and the exact working recipes** — so it can be referenced, shared with LLM agents / humans for
+development, and used to unlock **larger and newer models** later.
+
+> Mostly co-developed with a **locally-hosted LLM** used through **opencode** doing computer-use, with
+> the assistant authoring most scripts and documentation here interactively.
 
 ---
 
-## 1. GPU (primary LLM compute)
+## Project purpose
 
-| Property | GPU 0 | GPU 1 |
-|---|---|---|
-| Model | NVIDIA RTX PRO 5000 72GB Blackwell | NVIDIA RTX PRO 5000 72GB Blackwell |
-| VRAM total | 73,415 MiB (72 GB) | 73,415 MiB (72 GB) |
-| VRAM free | ~5.1 GB (in use by current model) | ~67.9 GB |
-| Compute capability | 12.0 (Blackwell) | 12.0 (Blackwell) |
-| Driver | 580.173.02 | same |
-| CUDA supported | 13.0 | 13.0 |
-| Peak power cap | 300 W | 300 W |
+This is not just diagnostics — it's an **experimentation + learning + development workspace** that
+tracks:
 
-**Key numbers**
-- **Total combined VRAM: ~146.8 GB** (2 × 72 GB, plus the ~1.4 GB stub per card not exposed in the 72 GB query).
-- Blackwell (`sm_120`) → full support for **FP8 and NVFP4 (NVIDIA 4-bit float)** native formats. These are the formats vLLM/NVIDIA optimized for Blackwell and give the best performance/VRAM tradeoff here. Also supports FP16/BF16/FP8/INT8.
-- Both GPUs already in use by the current `llama-server` container (GPU0 ~67.8 GB, GPU1 ~5.0 GB).
+- **System specs** and hardware capability (what can actually run here).
+- A **model catalog** — all models present on disk and their **fit verdict** for this hardware.
+- **Run attempts** — every time a model is served, with the working (or failing) recipe.
+- **Hardware troubleshooting** — a recurring, deeply-diagnosed power-trip fault and its evidence trail.
+- **Tooling** — capture/monitoring scripts, launch configurations, and DIMM diagnostics.
+- **Progress** — TODOs, resume notes, and what has been unlocked over time.
 
-## 2. CPU
+The goal: a long-lived, well-structured reference that makes it easy to (a) know what's here,
+(b) reproduce a working setup, and (c) keep pushing to **bigger and newer models**.
 
-| Property | Value |
+---
+
+## Repository layout
+
+| Path | What it is |
 |---|---|
-| Model | AMD EPYC 7663 56-Core |
-| Cores / threads | 56 cores / 112 threads |
-| Sockets | 1 |
-| Base/max clock | ~1.5 / 3.54 GHz |
-| NUMA nodes | 4 (0-3) |
+| **[`README.md`](README.md)** | This overview/index. |
+| **[`SYSTEM-SPEC.md`](SYSTEM-SPEC.md)** | Hardware spec: GPUs, CPU, RAM, storage, software stack, VRAM budget, NUMA/topology. |
+| **[`recipe/MODEL-CATALOG.md`](recipe/MODEL-CATALOG.md)** | Model catalog + recipes for all models on disk, with fit verdicts for this machine. |
+| **[`recipe/serve-qwen38-flash-next-nvfp4.sh`](recipe/serve-qwen38-flash-next-nvfp4.sh)** | One-shot launcher for the currently-working server (all settings baked in). |
+| **[`recipe/diag-dimm-fault.sh`](recipe/diag-dimm-fault.sh)** | DIMM fault diagnostic → warranty/RMA-ready output. |
+| **[`power-trip-diagnosis.md`](power-trip-diagnosis.md)** | Root-cause analysis + fix runbook for the recurring power-trip. |
+| **[`power-trip-instances.md`](power-trip-instances.md)** | Failure-event catalog (Instances 1–5) + evidence archive. |
+| **[`why-databric-syncflood-not-interceptable.md`](why-databric-syncflood-not-interceptable.md)** | Educational deep-dive: why a data-fabric sync-flood can't be gracefully intercepted. |
+| **[`README-ramoffload-research.md`](README-ramoffload-research.md)** | Research: serving models larger than VRAM via RAM+VRAM offload; empirical results. |
+| **[`README-3gpu.md`](README-3gpu.md)** | Speculative 3-GPU build assessment (capability + what it would enable). |
+| **[`powertrip-capture-readme.md`](powertrip-capture-readme.md)** | Crash-capture telemetry logger docs (what/how it logs). |
+| **[`RESUME-NOTE.md`](RESUME-NOTE.md)** | Live "how to bring the server back up" resume note + decisions. |
+| **[`PROJECT-TODOS.md`](PROJECT-TODOS.md)** | Tracked tasks (model serving / stability). |
+| Scripts | `power-debug-collect.sh`, `powertrip-capture.sh`, `run-powertrip-capture.sh` (+ `recipe/` scripts). |
+| `evidence/` | Raw captured traces (telemetry CSVs, kernel/serve logs, reset reasons) backing the diagnosis. |
 
-CPU matters mainly for: prompt prefill on CPU-only paths, system/tokenizer overhead, and **NOS (No-GPU-offload) not needed here** — the GPUs dominate. vLLM CPU offload (`--cpu-offload-gb`) can extend VRAM for very large models as a fallback.
+---
 
-## 3. Memory (host RAM)
+## Quick start
 
-| Property | Value |
-|---|---|
-| Total | 1.0 TiB |
-| Available | ~925 GiB |
+### The currently-working model server (Qwen3.8-Flash-Next-NVFP4)
 
-Plenty of RAM. Realistically not the constraint; can RAM-offload or use huge KV caches. 1 TiB also means models kept in RAM can be mmap-loaded.
+```bash
+bash recipe/serve-qwen38-flash-next-nvfp4.sh --restart
+```
 
-## 4. Storage
+This scripts the full working configuration — patched vLLM image, TP2, native **262,144** context,
+CUDA graphs (~39–55 tok/s), PLE CPU offload, and all the fabric-burst-reduction flags — plus it arms
+the crash-capture logger and sets the GPU power cap. Customize via `MAX_MODEL_LEN`, `MAX_NUM_SEQS`,
+`GPU_POWER_CAP`, `ENFORCE_EAGER`.
 
-| Mount | Type | Size | Used | Avail |
-|---|---|---|---|---|
-| `/trunk/ai` | ZFS | 17 T | 14 T (82%) | 3.1 T |
-| `/buffer` | LVM (NVMe 990 EVO) | 1 T | 250 G | 706 G |
-| `/` (root, NVMe 980 Pro LVM) | ext4 | 512 G | 172 G | 310 G |
-| `/trunk` (ZFS root) | ZFS | 3.1 T | ~0 | 3.1 T |
+### Diagnosing a suspected faulty DIMM
 
-**Constraint to watch:** `/trunk/ai` is 82% full with ~3.1 TB free. Very large model dumps (e.g. Multi-TB) will not fit. The NVMe-backed paths `/buffer` and root have more room but are much smaller. Models are staged there (`data-root: /buffer/docker` also hosts container images).
+```bash
+bash recipe/diag-dimm-fault.sh
+```
 
-## 5. Current running model context
+Prints per-channel CE/UE counts, maps EDAC channel → physical DIMM slot, and the reset-reason history —
+enough to file an RMA for the failing stick.
 
-- `llama-server` in Docker container `llama-qwen` (image `llamacpp:main`), port **8081**.
-- Model: **Qwen3.8-27B-BF16** (51 GB GGUF) + draft/MTP model.
-- VRAM footprint: **~72.7 GB** (67.8 GB GPU0 + 5.0 GB GPU1). Single 27B dense BF16 model nearly fills one card; 2-GPU speculative decode splits draft model.
+### Monitoring / telemetry
 
-## 6. Inference provider software available
+```bash
+bash run-powertrip-capture.sh start     # arm the crash-capture logger
+bash run-powertrip-capture.sh status
+```
 
-| Tool | Status |
-|---|---|
-| vLLM images | `vllm/vllm-openai:latest`, `:qwen38`, `:minimax-m3` (present) |
-| llama.cpp images | `llamacpp:main`, `llamacpp-minimax:latest/uns` (current) |
-| CUDA base/devel | `nvidia/cuda:13.0.0-base/devel-ubuntu24.04` |
-| NVIDIA Container Toolkit | 1.20.0 (nvidia runtime configured in `/etc/docker/daemon.json`) |
-| Native `vllm` | not installed on host (only via Docker) |
-| Ollama | not present |
+Writes per-second CPU/GPU telemetry + raw kernel log + EDAC to `/buffer/powertrip/` (persistent across
+reboots). The `powertrip-capture` container has `restart: unless-stopped`, so it auto-arms.
 
-vLLM is the most turnkey "different provider" option already available as an image and is a natural fit on Blackwell (best FP8/NVFP4 support).
+---
 
-## 7. VRAM budget analysis
+## Key topics
 
-Rule of thumb for vLLM/llama.cpp (weights ≈ params × bytes/param; add ~1.25–1.3× for KV cache + activations + CUDA context):
+### Hardware / capability
+- **System specs** → [`SYSTEM-SPEC.md`](SYSTEM-SPEC.md)
+- **Model fit / VRAM budget** → [`recipe/MODEL-CATALOG.md`](recipe/MODEL-CATALOG.md)
+- **3-GPU feasibility** → [`README-3gpu.md`](README-3gpu.md)
 
-| Weight precision | Bytes/param | Usable model size on ONE 72 GB card | On 2×72 GB (tensor- / pipeline-parallel) |
-|---|---|---|---|
-| BF16/FP16 | 2 | ~25–28 B | ~55–60 B |
-| FP8 | 1 | ~50–62 B | ~110–125 B |
-| NVFP4 / Q4 | 0.5 | ~100–140 B | ~220–290 B |
-| Q8/Q8_K_M | 1 | ~50-60 B | ~110-120 B |
+### The recurring power-trip (the biggest hardware story)
+The machine has a **data-fabric sync-flood reset** (`0x08000a00`) caused by a **marginal DIMM on
+channel G / slot MM4** that escalates from corrected-ECC to an uncorrectable error under heavy memory
+load.
+- **Root cause + fix runbook** → [`power-trip-diagnosis.md`](power-trip-diagnosis.md)
+- **Failure-event catalog** → [`power-trip-instances.md`](power-trip-instances.md)
+- **Why it can't be intercepted (+ CE vs. UE, fabric floods)** → [`why-databric-syncflood-not-interceptable.md`](why-databric-syncflood-not-interceptable.md)
+- **Capture tooling** → [`powertrip-capture-readme.md`](powertrip-capture-readme.md), `powertrip-capture.sh`, `run-powertrip-capture.sh`
 
-Practical usable **combined VRAM ≈ 128–135 GB** after context/activation/cuda overhead, assuming a single serving process.
+### Serving & models
+- **Working model recipe** → [`RESUME-NOTE.md`](RESUME-NOTE.md), `recipe/serve-qwen38-flash-next-nvfp4.sh`
+- **RAM+VRAM offload research** → [`README-ramoffload-research.md`](README-ramoffload-research.md)
+- **Model catalog & fit** → [`recipe/MODEL-CATALOG.md`](recipe/MODEL-CATALOG.md)
 
-## 8. Which candidate models fit (from those already downloaded)
+### Progress
+- [`PROJECT-TODOS.md`](PROJECT-TODOS.md) — open/closed tasks.
 
-Quantized weight size (excl. KV overhead) and fit verdict for a 2×(72 GB) single-process serve:
+---
 
-| Model (format) | On-disk size | VRAM fit (single proc) | Notes |
-|---|---|---|---|
-| Qwen-AgentWorld-35B-A3B GGUF UD-Q8_K_XL | 36 GB | ✅ Comfortable on 1 GPU | MoE, fast |
-| Qwen3.8-27B NVFP4 | 22 GB | ✅ Comfortable on 1 GPU | High quality/VRAM ratio (Blackwell NVFP4) |
-| Qwen3.8-27B FP8 | 29 GB | ✅ Comfortable on 1 GPU | |
-| Qwen3.8-Flash-Next GGUF UD-Q4 | 104 GB (4×47G shards) | ⚠️ Fits w/ 2 GPUs (split) | Flash-class; verify it's the full 4-shard set |
-| DeepSeek-V4-Flash NVFP4 | 150 GB | ⚠️ Just fits on 2 GPUs (tight) | Needs careful KV/parallel config |
-| GLM-5.3-Flash GGUF UD-Q4 | 186 GB (6 shards) | ❌ Too large (>135 GB usable) | Not single-config eligible |
-| nvidia/GLM-5.2-NVFP4 | 426 GB | ❌ Too large | Multi-node/offload only |
-| Qwen3.5-397B-A17B NVFP4 | 223 GB | ❌ Too large (~200 GB weights) | Offload/partial only |
-| MiniMaxAI/MiniMax-M3 | 664 GB | ❌ | — |
-| DeepSeek-V4-Pro | 786 GB | ❌ | — |
-| Solar-Open2-250B | 467 GB | ❌ | — |
-| Inkling | ~2 TB (108 shards) | ❌ | — |
+## Status snapshot (as of 2026-09-06)
 
-## 9. Recommendation summary
+- **Serving:** `Qwen3.8-Flash-Next-NVFP4` at native **262k** context, CUDA graphs ON, **~39–55 tok/s**
+  on 2× RTX Pro 5000 (TP2), PLE table offloaded to host RAM.
+- **Software blockers resolved:** NCCL cross-NUMA/no-NVLink hang, FP8-PLE selector bug (vLLM #54765),
+  CUSTOM all-reduce CUDA error, and `pidfd` permission — all fixed and baked into the recipe script.
+- **Outstanding hardware issue:** the channel-G/MM4 DIMM fault (see the power-trip docs) — mitigate with
+  the burst-reduction flags + GPU cap, fix long-term via DIMM replacement/downclock/Gen3.
 
-- **Sweet spot for this machine:** 27–40 B dense models at FP8/NVFP4 (one GPU), or ~70 B-class / large-MoE models quantized **across both GPUs**.
-- **Best "different provider" path:** **vLLM** (image already present, native Blackwell FP8/NVFP4 support) or **TRT-LLM**. No need for llama.cpp.
-- **Best-quality-per-VRAM candidates already downloaded:** `Qwen3.8-27B-NVFP4` (22 GB), `Qwen-AgentWorld-35B-A3B` (36 GB, MoE), `Qwen3.8-Flash-Next` (needs 2 GPUs).
-- **Avoid** unless using CPU/RAM offload or multi-node: 300 B+ or full-PRECISION huge dumps (MiniMax-M3, DeepSeek-V4-Pro, Solar-Open2-250B, Inkling).
-- **Storage note:** ~3.1 TB free on `/trunk/ai`; large new models (especially >300 GB) may not fit without pruning existing dumps.
+---
 
-## 10. Next-step plan (moving off llama.cpp)
+## Notes on the hardware caveat & safety
 
-1. Pick target model + provider, e.g. **Qwen3.8-27B-NVFP4 @ vLLM** (`vllm/vllm-openai:qwen38` image exists — verify tag matches the NVFP4 files).
-2. Define GPU mapping (both cards; `--tensor-parallel-size 2` if >72 GB needed).
-3. Define serving container via **docker-compose** (preferred over raw `docker run`), port + alias to replace 8081.
-4. Stop/remove current `llama-qwen` container (restart policy `unless-stopped` — must not be left to auto-restart).
-5. Validate: `/v1/models` reachable, prompt-benchmark tokens/s & latency, measure VRAM headroom.
+This machine has served frontier-class 125B-parameter models on a single socket with a known
+marginal DIMM. The docs capture everything (evidence, mitigation, and the educational "why"). The
+recurring reset is protective (see the "why not interceptable" doc) — the real path is to **fix or
+replace the failing DIMM**, which is a legitimate RMA case (see `recipe/diag-dimm-fault.sh`).
+
+**Serve is intentionally manual-only** (see `RESUME-NOTE.md`) to avoid an auto-restart loop from the
+trip-prone load; the telemetry capture is the only auto-starting piece.
