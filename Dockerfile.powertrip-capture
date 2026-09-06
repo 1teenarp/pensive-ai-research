@@ -1,0 +1,7 @@
+FROM ubuntu:24.04
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+    bc curl dmidecode jq sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY powertrip-capture.sh /usr/local/bin/powertrip-capture
+RUN chmod +x /usr/local/bin/powertrip-capture
+ENTRYPOINT ["/usr/local/bin/powertrip-capture"]

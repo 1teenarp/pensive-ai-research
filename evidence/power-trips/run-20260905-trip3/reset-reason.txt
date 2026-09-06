@@ -1,0 +1,12 @@
+# Instance 5 trip - reset reason + MCE evidence
+# Sourced from: grep 'Previous system reset' /var/log/syslog ; journalctl -k -b -1
+
+2026-09-05T17:44:01.176970-07:00 pensive kernel: x86/amd: Previous system reset reason [0x08000a00]: internal CPU thermal limit was tripped
+2026-09-05T17:44:01.176973-07:00 pensive kernel: x86/amd: Previous system reset reason [0x08000a00]: an uncorrected error caused a data fabric sync flood event
+
+# HEST corrected-error threshold (confirms EDAC ready):
+Sep 05 16:32:06 pensive kernel: mce: HEST corrected error threshold limit: 10
+
+# Reset reason near boot:
+Sep 05 17:43:47 pensive kernel: x86/amd: Previous system reset reason [0x08000a00]: internal CPU thermal limit was tripped
+Sep 05 17:43:47 pensive kernel: x86/amd: Previous system reset reason [0x08000a00]: an uncorrected error caused a data fabric sync flood event

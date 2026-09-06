@@ -1,0 +1,9 @@
+# Reset reason evidence (sourced via: grep -a "Previous system reset" /var/log/kern.log /var/log/syslog)
+# Host: pensive ; confirmed with: uptime -s (boot time) and TZ=UTC date (log-timezone offset)
+
+2026-09-03T09:59:21.173424-07:00 pensive kernel: x86/amd: Previous system reset reason [0x00200800]: ACPI power state transition occurred
+2026-09-04T00:37:39.712423-07:00 pensive kernel: x86/amd: Previous system reset reason [0x08000a00]: internal CPU thermal limit was tripped
+2026-09-04T00:37:39.712425-07:00 pensive kernel: x86/amd: Previous system reset reason [0x08000a00]: an uncorrected error caused a data fabric sync flood event
+2026-09-04T08:54:07.469139-07:00 pensive kernel: x86/amd: Previous system reset reason [0x00200800]: ACPI power state transition occurred
+2026-09-05T13:18:29.033544-07:00 pensive kernel: x86/amd: Previous system reset reason [0x08000a00]: internal CPU thermal limit was tripped
+2026-09-05T13:18:29.033546-07:00 pensive kernel: x86/amd: Previous system reset reason [0x08000a00]: an uncorrected error caused a data fabric sync flood event
