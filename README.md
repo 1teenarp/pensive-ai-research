@@ -35,6 +35,7 @@ The goal: a long-lived, well-structured reference that makes it easy to (a) know
 | Path | What it is |
 |---|---|
 | **[`README.md`](README.md)** | This overview/index. |
+| **[`AGENTS.md`](AGENTS.md)** | **Power-trip investigation runbook** — the entry point for any fresh session/agent to pick up the hardware-fault analysis without prior history. |
 | **[`SYSTEM-SPEC.md`](SYSTEM-SPEC.md)** | Hardware spec: GPUs, CPU, RAM, storage, software stack, VRAM budget, NUMA/topology. |
 | **[`recipe/MODEL-CATALOG.md`](recipe/MODEL-CATALOG.md)** | Model catalog + recipes for all models on disk, with fit verdicts for this machine. |
 | **[`recipe/serve-qwen38-flash-next-nvfp4.sh`](recipe/serve-qwen38-flash-next-nvfp4.sh)** | One-shot launcher for the currently-working server (all settings baked in). |
@@ -82,7 +83,8 @@ bash run-powertrip-capture.sh status
 ```
 
 Writes per-second CPU/GPU telemetry + raw kernel log + EDAC to `/buffer/powertrip/` (persistent across
-reboots). The `powertrip-capture` container has `restart: unless-stopped`, so it auto-arms.
+reboots). The `powertrip-capture` container is **manual** (`restart: no`) — it is armed by the
+`--start` script, not auto-start, so debug/hardware logging only runs during a model-load session.
 
 ---
 
@@ -131,4 +133,5 @@ recurring reset is protective (see the "why not interceptable" doc) — the real
 replace the failing DIMM**, which is a legitimate RMA case (see `recipe/diag-dimm-fault.sh`).
 
 **Serve is intentionally manual-only** (see `RESUME-NOTE.md`) to avoid an auto-restart loop from the
-trip-prone load; the telemetry capture is the only auto-starting piece.
+trip-prone load. The debug/hardware logging (`powertrip-capture` + `edac-ce-watch`) is also **manual** —
+armed only by the `--start` script for a model-load session, not auto-starting on boot.

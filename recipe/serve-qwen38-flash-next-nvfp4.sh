@@ -27,6 +27,7 @@ IMAGE="${IMAGE:-vllm/vllm-openai:qwen38-flash-next-patched}"
 BASE_IMAGE="${BASE_IMAGE:-vllm/vllm-openai:qwen38-flash-next}"
 NAME="${NAME:-qwen38-flash-serve}"
 PORT="${PORT:-8090}"
+SERVED_MODEL="${SERVED_MODEL:-nvidia/Qwen3.8-Flash-Next-NVFP4}"
 GPU_POWER_CAP="${GPU_POWER_CAP:-250}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
@@ -109,11 +110,23 @@ apply_power_cap(){
   done
 }
 
+arm_edac_watch(){
+  if [ "${1:-}" = "--no-edac" ]; then log "skipping EDAC CE watch"; return 0; fi
+  # Only match a running *loop* process (args = the script with no sub-args), not the current
+  # launcher's own command line or a one-shot --status/--once invocation.
+  if pgrep -f ".../edac-ce-watch.sh" >/dev/null 2>&1 || pgrep -x edac-ce-watch.sh >/dev/null 2>&1; then
+    log "EDAC CE watch already running"
+  else
+    log "arming EDAC CE watch (pre-trip corrected-ECC monitor)"
+    nohup bash "$REPO_DIR/recipe/edac-ce-watch.sh" >/var/tmp/edac-ce-watch.out 2>&1 &
+  fi
+}
+
 start_serve(){
   local extra=()
   [ "$ENFORCE_EAGER" = "1" ] && extra+=(--enforce-eager)
   docker rm -f "$NAME" >/dev/null 2>&1
-  log "launching $NAME (model=$MODEL, ctx=$MAX_MODEL_LEN, seqs=$MAX_NUM_SEQS, eager=$ENFORCE_EAGER)"
+  log "launching $NAME (model=$MODEL, served=$SERVED_MODEL, ctx=$MAX_MODEL_LEN, seqs=$MAX_NUM_SEQS, eager=$ENFORCE_EAGER)"
   nohup docker run -d --name "$NAME" \
     --gpus all --shm-size 16g --ipc=host \
     --cap-add SYS_PTRACE --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
@@ -123,6 +136,7 @@ start_serve(){
     -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     "$IMAGE" \
     /model --tensor-parallel-size 2 --quantization modelopt \
+    --served-model-name "$SERVED_MODEL" \
     --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_NUM_SEQS" \
     --gpu-memory-utilization 0.90 --disable-custom-all-reduce \
     --max-parallel-loading-workers 1 \
@@ -140,22 +154,23 @@ status(){
 
 # ---------- main ----------
 ACTION="${1:---restart}"
+SKIP_CAP=""
+SKIP_EDAC=""
+# normalize --no-capture / --no-edac (with or without extra args) to --restart
 case "$ACTION" in
-  --no-capture|--no-capture*)
-    ACTION="--restart"
-    SKIP_CAP="--no-capture"
-    ;;
+  *--no-capture*) ACTION="--restart"; SKIP_CAP="--no-capture" ;;
+  *--no-edac*)    ACTION="--restart"; SKIP_EDAC="--no-edac" ;;
 esac
 
 case "$ACTION" in
   --start)
-    ensure_image; arm_capture "$SKIP_CAP"; apply_power_cap; start_serve ;;
+    ensure_image; arm_capture "$SKIP_CAP"; arm_edac_watch "$SKIP_EDAC"; apply_power_cap; start_serve ;;
   --restart)
-    ensure_image; arm_capture "$SKIP_CAP"; apply_power_cap; start_serve ;;
+    ensure_image; arm_capture "$SKIP_CAP"; arm_edac_watch "$SKIP_EDAC"; apply_power_cap; start_serve ;;
   --stop)
     docker rm -f "$NAME" >/dev/null 2>&1 && log "stopped $NAME" || log "no $NAME running" ;;
   --status)
     status ;;
   *)
-    die "usage: $0 [--start|--restart|--stop|--status] [--no-capture]" ;;
+    die "usage: $0 [--start|--restart|--stop|--status] [--no-capture] [--no-edac]" ;;
 esac

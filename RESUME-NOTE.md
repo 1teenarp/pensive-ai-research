@@ -11,8 +11,9 @@ power-trip.** The software path is fully validated end-to-end (weight load → P
   Reason: the recurring hardware fault (channel G / MM4 data-fabric sync-flood, see
   `power-trip-instances.md`) fires during the heavy ~80 GB weight-load burst. If the serve auto-started
   on boot it could trip the box and loop reboots.
-- `powertrip-capture` (the telemetry logger) **is** `restart: unless-stopped` — let it stay that way so
-  the next trip is captured automatically.
+- `powertrip-capture` (the telemetry logger) and `edac-ce-watch` are **also manual** (`restart: no`) —
+  they are armed by `recipe/serve-qwen38-flash-next-nvfp4.sh --start` for a model-load/debug session,
+  and do NOT auto-start on boot. This keeps all specialized metric containers on-demand.
 - To run the server after a boot/reboot, launch **manually** with the command in "The exact serve
   command" below. The patched image and patched `ple_layer.py` survive reboots (they're in Docker layer
   cache), so no rebuild is needed unless the image is pruned.
@@ -84,13 +85,15 @@ fabric timing. Long-term fix = memtest + RAM downclock + GPU→Gen3 (see `power-
   across reboot**; if the image is gone, rebuild from `qwen38-flash-next` + `ple_layer.py` patch
   (patch is also described in `power-trip-instances.md` Instance 4 and `README-ramoffload-research.md`).
 
-## Capture (auto-starts, survives reboot)
-- Container `powertrip-capture` (`restart: unless-stopped`), image `powertrip-capture:local`.
+## Capture (manual; armed by the --start script)
+- Container `powertrip-capture` (`restart: no`), image `powertrip-capture:local` — started on-demand via
+  `recipe/serve-qwen38-flash-next-nvfp4.sh --start` (or `run-powertrip-capture.sh start`). Not auto-start.
+- Also armed by the script: `edac-ce-watch` (corrected-ECC pre-trip monitor) and the GPU power cap.
 - Launcher: `bash /home/praneet/Workspace/pensive-ai-research/run-powertrip-capture.sh start`.
 - Captures to **`/buffer/powertrip/`** (persistent). Readable docs: `powertrip-capture-readme.md`.
 - It writes telemetry CSV, raw klog (dmesg), edac CSV, summary. Sample interval ~1 s.
-- **Worth checking on resume:** does it auto-start at boot? (It did last time because docker restarts
-  `unless-stopped` containers and `/buffer` persists.) If not, start it manually FIRST, then the serve.
+- **Manual, not auto-start** (per decision). Start it with the serve script (`--start`) or
+  `run-powertrip-capture.sh start` before a model-load/debug session.
 
 ## Evidence / next deep-dive pointers
 - Instance catalog: `power-trip-instances.md` (Instances 1–4). Evidence: `evidence/power-trips/`.

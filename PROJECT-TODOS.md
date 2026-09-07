@@ -50,10 +50,9 @@ Now have an on-box, crash-safe telemetry logger: `powertrip-capture.sh` + `power
 image (launcher `run-powertrip-capture.sh`). Runs privileged, writes every ~1 s to persistent
 `/buffer/powertrip/` (survives reboot): CPU Tctl+8 chiplets, RAPL package/core watts, freq, load, mem,
 both GPUs (temp/power/mem/util/PCIe link/ECC), raw `dmesg` snapshots, EDAC table, DIMM map.
-See `powertrip-capture-readme.md`. Set up a persistent temp logger (cron/background write) too so this
-is ALWAYS on, not just when manually started.
-- TODO: enable a systemd service (or host cron) to auto-start the capture container at boot, so it's
-  armed during any heavy session without manual launch whenever next time.
+See `powertrip-capture-readme.md`. Plus `recipe/edac-ce-watch.sh` for a corrected-ECC pre-trip alert.
+- **Manual by design:** capture + edac-ce-watch are `restart: no` and armed on-demand by
+  `recipe/serve-qwen38-flash-next-nvfp4.sh --start` for a model-load/debug session. NOT auto-start on boot.
 
 ### B3. Investigate CPU thermal trip — TODO
 - `thermald` won't run on this AMD EPYC (unsupported) → no OS thermal governor; the CPU relies on its internal SMU limit.
