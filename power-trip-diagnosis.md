@@ -5,6 +5,31 @@ Purpose: root-cause and fix the recurring **sudden power-off / hard reboot** on 
 
 ---
 
+## Status update — 2026-09-08 (isolation/RMA testing in progress)
+
+Acted on the fix plan below (§3, step 1): **physically removed the suspect DIMM (slot MM4 / channel G)
+and its NUMA-node half (4 of 8 DIMMs total)** to isolate it. memtest86 on the remaining ~512 GB came
+back **clean**. This is a temporary diagnostic configuration, not the final state:
+
+1. Current: 4 DIMMs populated (~499 GiB), NUMA nodes 2 and 3 memory-less. Re-testing/monitoring for
+   trips in this reduced config.
+2. Next: identify the specific bad stick among the 4 removed (this run only excluded "at least one of
+   these four," not which), so it can be RMA'd individually.
+3. Then: reinstall the other 7 known-good sticks (interim state, one socket-half short until the RMA
+   replacement arrives) and re-test again.
+4. Finally: reinstall the RMA replacement, back to the full 8-DIMM / 1 TiB config.
+
+`SYSTEM-SPEC.md`'s hardware-status banner and §3 track the live RAM figure at each stage — re-verify
+with `numactl -H` rather than trusting any hardcoded number, here or elsewhere, until this settles.
+
+Side effect discovered during re-test: with GPU0's local NUMA node (3) now memory-less, NCCL's
+host-memory registration probe (`ncclCuMemHostEnable`/`cuMemCreate`) segfaults on launch instead of
+degrading gracefully. Fixed in `recipe/serve-qwen38-flash-next-nvfp4.sh` with a NUMA-topology
+auto-detect (sets `NCCL_CUMEM_HOST_ENABLE=0` only when a GPU's local node is memory-less) — this is not
+a hardware issue, just a heads-up for whichever intermediate DIMM configuration you're testing next.
+
+---
+
 ## 1. What happened (the tripping incident)
 
 While running **memory-bandwidth stress + full-CPU (56-thread) benchmark + GPU PCIe H2D benchmarks**, with a RAM-offloaded 397B LLM server (~103W GPU) and the metrics stack also running, the machine **hard-rebooted**.
@@ -58,7 +83,7 @@ Run WITHOUT inducing heavy load first; only do the stress step after a DIMM chan
 
 ### Step A — Collect evidence (safe, idle)
 ```bash
-bash /home/praneet/Workspace/scratch/power-debug-collect.sh
+bash /home/praneet/Workspace/pensive-ai-research/power-debug-collect.sh
 ```
 Captures: reset reason, MCE/panic lines, per-channel ECC tally, CPU/GPU/NVMe temps, CPU freq/governor/boost, package power, GPU power/temps, running containers, DMI memory map, and memory slot↔channel map.
 
@@ -89,5 +114,5 @@ Interpretation: if ECC errors **jump on channel G (MM4)** during the memory test
 After each step run `power-debug-collect.sh` and compare the ECC tally and reset-reason lines. A stable run shows no new "uncorrected error / sync flood" reset reason and no growth on channel G.
 
 ## 5. Files
-- `/home/praneet/Workspace/scratch/power-debug-collect.sh` — evidence collector (safe).
-- `/home/praneet/Workspace/scratch/power-trip-diagnosis.md` — this document.
+- `/home/praneet/Workspace/pensive-ai-research/power-debug-collect.sh` — evidence collector (safe).
+- `/home/praneet/Workspace/pensive-ai-research/power-trip-diagnosis.md` — this document.

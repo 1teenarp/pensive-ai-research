@@ -18,6 +18,10 @@
 #   GPU_POWER_CAP=250   nvidia-smi -pl cap to apply to both GPUs
 #   MAX_MODEL_LEN=262144  MAX_NUM_SEQS=2   context/concurrency (native context needs low concurrency)
 #   ENFORCE_EAGER=1     fall back to --enforce-eager (slower ~1/4 decode) if CUDA-graph warmup trips
+#   NCCL_CUMEM_HOST_ENABLE=auto|0|1   auto (default) probes NUMA topology and forces 0 if any GPU's
+#     local NUMA node is memory-less (segfaults in ncclCuMemHostEnable/cuMemCreate otherwise — seen
+#     after removing the faulty-DIMM socket half, which left GPU0's local node (3) with 0 MB). Set to
+#     1 to force NCCL's default (host cuMem registration on) once all NUMA nodes have memory again.
 #
 set -u
 
@@ -27,10 +31,12 @@ IMAGE="${IMAGE:-vllm/vllm-openai:qwen38-flash-next-patched}"
 BASE_IMAGE="${BASE_IMAGE:-vllm/vllm-openai:qwen38-flash-next}"
 NAME="${NAME:-qwen38-flash-serve}"
 PORT="${PORT:-8090}"
+SERVED_MODEL="${SERVED_MODEL:-nvidia/Qwen3.8-Flash-Next-NVFP4}"
 GPU_POWER_CAP="${GPU_POWER_CAP:-250}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
+NCCL_CUMEM_HOST_ENABLE="${NCCL_CUMEM_HOST_ENABLE:-auto}"
 SERVE_LOG="${SERVE_LOG:-/var/tmp/serve.log}"   # persistent, not /tmp
 
 # Pull-in the patched ple_layer.py from the patched-build dir if the image is missing.
@@ -104,16 +110,88 @@ arm_capture(){
 
 apply_power_cap(){
   log "setting GPU power cap to ${GPU_POWER_CAP} W (nvidia-smi -pl)"
+  local mismatch=0
   nvidia-smi --query-gpu=index --format=csv,noheader,nounits | while read -r i; do
-    nvidia-smi -pl "$GPU_POWER_CAP" -i "$i" >/dev/null 2>&1 || log "warn: cap failed on gpu $i"
+    nvidia-smi -pl "$GPU_POWER_CAP" -i "$i" >/dev/null 2>&1 || log "warn: cap command failed on gpu $i"
   done
+  # Verify — the cap command can fail silently (e.g. insufficient privileges) without a non-zero exit
+  # in some driver/container combos, so check the resulting live limit rather than trusting the exit code.
+  while IFS=, read -r i limit; do
+    i="$(echo "$i" | tr -d ' ')"; limit="$(echo "$limit" | tr -d ' ')"
+    limit_int="${limit%%.*}"
+    if [ -n "$limit_int" ] && [ "$limit_int" -gt "$GPU_POWER_CAP" ] 2>/dev/null; then
+      log "*** WARNING: gpu $i power limit is ${limit} W, NOT the requested ${GPU_POWER_CAP} W cap — cap did not apply ***"
+      mismatch=1
+    fi
+  done < <(nvidia-smi --query-gpu=index,power.limit --format=csv,noheader,nounits)
+  [ "$mismatch" = "1" ] && log "*** power cap mismatch above is NOT fatal but this run has less fabric-load margin than the recipe assumes ***"
+}
+
+check_numa_topology(){
+  # NCCL's ncclCuMemHostEnable() probes cuMemCreate on each GPU's *local* NUMA node during
+  # ncclCommInitRank. If that node is memory-less (e.g. its DIMMs were pulled) the probe segfaults
+  # instead of failing gracefully. Detect that here and force NCCL_CUMEM_HOST_ENABLE=0 to skip the
+  # probe. Resolves RESOLVED_CUMEM_HOST_ENABLE ("" = don't pass the flag, i.e. NCCL default).
+  log "NUMA topology check (GPU-local node memory):"
+  local empty_gpu_node=0
+  local busid sysbus node mem_kb mem_mb
+  while IFS=, read -r busid; do
+    busid="$(echo "$busid" | tr -d ' \r')"
+    [ -z "$busid" ] && continue
+    sysbus="$(echo "${busid/#0000/}" | tr 'A-Z' 'a-z')"
+    node="$(cat "/sys/bus/pci/devices/${sysbus}/numa_node" 2>/dev/null)"
+    if [ -z "$node" ] || [ "$node" -lt 0 ] 2>/dev/null; then
+      log "  gpu $busid: no NUMA affinity reported"
+      continue
+    fi
+    mem_kb="$(awk '/MemTotal/{print $4}' "/sys/devices/system/node/node${node}/meminfo" 2>/dev/null)"
+    mem_kb="${mem_kb:-0}"
+    mem_mb=$(( mem_kb / 1024 ))
+    log "  gpu $busid -> numa node $node (${mem_mb} MB local memory)"
+    if [ "$mem_mb" -eq 0 ]; then
+      log "  WARNING: gpu $busid's local NUMA node $node is memory-less (0 MB)"
+      empty_gpu_node=1
+    fi
+  done < <(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader)
+
+  case "$NCCL_CUMEM_HOST_ENABLE" in
+    auto)
+      if [ "$empty_gpu_node" = "1" ]; then
+        RESOLVED_CUMEM_HOST_ENABLE=0
+        log "-> memory-less GPU-local NUMA node detected; forcing NCCL_CUMEM_HOST_ENABLE=0"
+      else
+        RESOLVED_CUMEM_HOST_ENABLE=""
+        log "-> all GPU-local NUMA nodes have memory; leaving NCCL_CUMEM_HOST_ENABLE at its default"
+      fi
+      ;;
+    *)
+      RESOLVED_CUMEM_HOST_ENABLE="$NCCL_CUMEM_HOST_ENABLE"
+      log "-> NCCL_CUMEM_HOST_ENABLE explicitly overridden to $RESOLVED_CUMEM_HOST_ENABLE"
+      ;;
+  esac
+}
+
+arm_edac_watch(){
+  if [ "${1:-}" = "--no-edac" ]; then log "skipping EDAC CE watch"; return 0; fi
+  # Only match a running *loop* process (args = the script with no sub-args), not the current
+  # launcher's own command line or a one-shot --status/--once invocation.
+  if pgrep -f ".../edac-ce-watch.sh" >/dev/null 2>&1 || pgrep -x edac-ce-watch.sh >/dev/null 2>&1; then
+    log "EDAC CE watch already running"
+  else
+    log "arming EDAC CE watch (pre-trip corrected-ECC monitor)"
+    nohup bash "$REPO_DIR/recipe/edac-ce-watch.sh" >/var/tmp/edac-ce-watch.out 2>&1 &
+  fi
 }
 
 start_serve(){
   local extra=()
   [ "$ENFORCE_EAGER" = "1" ] && extra+=(--enforce-eager)
+  local cumem_env=()
+  if [ -n "${RESOLVED_CUMEM_HOST_ENABLE:-}" ]; then
+    cumem_env+=(-e "NCCL_CUMEM_HOST_ENABLE=${RESOLVED_CUMEM_HOST_ENABLE}")
+  fi
   docker rm -f "$NAME" >/dev/null 2>&1
-  log "launching $NAME (model=$MODEL, ctx=$MAX_MODEL_LEN, seqs=$MAX_NUM_SEQS, eager=$ENFORCE_EAGER)"
+  log "launching $NAME (model=$MODEL, served=$SERVED_MODEL, ctx=$MAX_MODEL_LEN, seqs=$MAX_NUM_SEQS, eager=$ENFORCE_EAGER, NCCL_CUMEM_HOST_ENABLE=${RESOLVED_CUMEM_HOST_ENABLE:-<default>})"
   nohup docker run -d --name "$NAME" \
     --gpus all --shm-size 16g --ipc=host \
     --cap-add SYS_PTRACE --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
@@ -121,8 +199,10 @@ start_serve(){
     -e NCCL_P2P_DISABLE=1 -e VLLM_PLE_CPU_OFFLOAD=1 -e VLLM_QWEN38_PLE_FP8_SCALE=1 \
     -e VLLM_WORKER_MULTIPROC_METHOD=spawn \
     -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    "${cumem_env[@]}" \
     "$IMAGE" \
     /model --tensor-parallel-size 2 --quantization modelopt \
+    --served-model-name "$SERVED_MODEL" \
     --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_NUM_SEQS" \
     --gpu-memory-utilization 0.90 --disable-custom-all-reduce \
     --max-parallel-loading-workers 1 \
@@ -140,22 +220,23 @@ status(){
 
 # ---------- main ----------
 ACTION="${1:---restart}"
+SKIP_CAP=""
+SKIP_EDAC=""
+# normalize --no-capture / --no-edac (with or without extra args) to --restart
 case "$ACTION" in
-  --no-capture|--no-capture*)
-    ACTION="--restart"
-    SKIP_CAP="--no-capture"
-    ;;
+  *--no-capture*) ACTION="--restart"; SKIP_CAP="--no-capture" ;;
+  *--no-edac*)    ACTION="--restart"; SKIP_EDAC="--no-edac" ;;
 esac
 
 case "$ACTION" in
   --start)
-    ensure_image; arm_capture "$SKIP_CAP"; apply_power_cap; start_serve ;;
+    ensure_image; arm_capture "$SKIP_CAP"; arm_edac_watch "$SKIP_EDAC"; apply_power_cap; check_numa_topology; start_serve ;;
   --restart)
-    ensure_image; arm_capture "$SKIP_CAP"; apply_power_cap; start_serve ;;
+    ensure_image; arm_capture "$SKIP_CAP"; arm_edac_watch "$SKIP_EDAC"; apply_power_cap; check_numa_topology; start_serve ;;
   --stop)
     docker rm -f "$NAME" >/dev/null 2>&1 && log "stopped $NAME" || log "no $NAME running" ;;
   --status)
     status ;;
   *)
-    die "usage: $0 [--start|--restart|--stop|--status] [--no-capture]" ;;
+    die "usage: $0 [--start|--restart|--stop|--status] [--no-capture] [--no-edac]" ;;
 esac

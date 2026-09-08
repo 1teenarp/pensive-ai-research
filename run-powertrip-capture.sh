@@ -5,7 +5,10 @@
 #   RAPL package power, dmesg, and EDAC, plus host GPU via mounted nvidia-smi.
 # - Writes directly to /buffer/powertrip (/capture inside) which SURVIVES the
 #   power-trip reset (unlike /tmp).
-# - Restart policy: unless-stopped (keeps sampling across accidental stops).
+# - Restart policy: no (manual). The capture logger runs ONLY when started here
+#   (or via recipe/serve-qwen38-flash-next-nvfp4.sh --start); it does NOT auto-start
+#   on boot. This is deliberate: specialized metric containers are started on-demand
+#   for a model-load/debug session, not left running across reboots.
 #
 # Usage:
 #   bash run-powertrip-capture.sh start   # launch capture (name: powertrip-capture)
@@ -32,7 +35,7 @@ case "${1:-start}" in
     docker rm -f "$NAME" >/dev/null 2>&1
     docker run -d --name "$NAME" \
       --privileged --pid=host --net=host \
-      --restart unless-stopped \
+      --restart no \
       -e OUTDIR=/capture -e INTERVAL="$INTERVAL" \
       "${nvidia_mounts[@]}" \
       -v /var/lib/rasdaemon:/var/lib/rasdaemon:ro \

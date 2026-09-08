@@ -11,8 +11,9 @@ power-trip.** The software path is fully validated end-to-end (weight load → P
   Reason: the recurring hardware fault (channel G / MM4 data-fabric sync-flood, see
   `power-trip-instances.md`) fires during the heavy ~80 GB weight-load burst. If the serve auto-started
   on boot it could trip the box and loop reboots.
-- `powertrip-capture` (the telemetry logger) **is** `restart: unless-stopped` — let it stay that way so
-  the next trip is captured automatically.
+- `powertrip-capture` (the telemetry logger) and `edac-ce-watch` are **also manual** (`restart: no`) —
+  they are armed by `recipe/serve-qwen38-flash-next-nvfp4.sh --start` for a model-load/debug session,
+  and do NOT auto-start on boot. This keeps all specialized metric containers on-demand.
 - To run the server after a boot/reboot, launch **manually** with the command in "The exact serve
   command" below. The patched image and patched `ple_layer.py` survive reboots (they're in Docker layer
   cache), so no rebuild is needed unless the image is pruned.
@@ -26,8 +27,18 @@ PLE registration → CUDA-graph capture):
 3. **CUSTOM all-reduce CUDA error** — add `--disable-custom-all-reduce` (falls back to PYNCCL).
 4. **pidfd_getfd permission** — add `--cap-add SYS_PTRACE --security-opt seccomp=unconfined
    --security-opt apparmor=unconfined`.
+5. **NCCL host-cuMem segfault on a memory-less GPU-local NUMA node** (2026-09-08, after 4 DIMMs were
+   pulled for isolation/RMA testing — see `SYSTEM-SPEC.md` hardware-status banner) — `ncclCuMemHostEnable`
+   segfaults in `cuMemCreate` instead of degrading gracefully when a GPU's local NUMA node has 0 MB.
+   Fixed via a NUMA-topology auto-detect in the script, which sets `NCCL_CUMEM_HOST_ENABLE=0` only when
+   needed. **This is NUMA-state-dependent, not a static flag** — see the caveat on the command below.
 
 ### The exact serve command (patched image) — CURRENT BEST (native context, CUDA graphs)
+> ⚠️ **Don't hand-copy this raw command while the DIMM testing is in progress (see `SYSTEM-SPEC.md`
+> banner).** It's missing blocker #5's conditional `NCCL_CUMEM_HOST_ENABLE=0` — pasting it as-is will hit
+> the cuMem segfault whenever a GPU's local NUMA node is currently memory-less. **Use
+> `recipe/serve-qwen38-flash-next-nvfp4.sh` instead** — it derives this flag live from the actual NUMA
+> topology every launch, so it stays correct as DIMMs go back in. This block is kept for reference only.
 ```bash
 MODEL=/trunk/ai/huggingface/models/nvidia/Qwen3.8-Flash-Next-NVFP4
 docker run -d --name qwen38-flash-serve --gpus all --shm-size 16g --ipc=host \
@@ -84,13 +95,15 @@ fabric timing. Long-term fix = memtest + RAM downclock + GPU→Gen3 (see `power-
   across reboot**; if the image is gone, rebuild from `qwen38-flash-next` + `ple_layer.py` patch
   (patch is also described in `power-trip-instances.md` Instance 4 and `README-ramoffload-research.md`).
 
-## Capture (auto-starts, survives reboot)
-- Container `powertrip-capture` (`restart: unless-stopped`), image `powertrip-capture:local`.
+## Capture (manual; armed by the --start script)
+- Container `powertrip-capture` (`restart: no`), image `powertrip-capture:local` — started on-demand via
+  `recipe/serve-qwen38-flash-next-nvfp4.sh --start` (or `run-powertrip-capture.sh start`). Not auto-start.
+- Also armed by the script: `edac-ce-watch` (corrected-ECC pre-trip monitor) and the GPU power cap.
 - Launcher: `bash /home/praneet/Workspace/pensive-ai-research/run-powertrip-capture.sh start`.
 - Captures to **`/buffer/powertrip/`** (persistent). Readable docs: `powertrip-capture-readme.md`.
 - It writes telemetry CSV, raw klog (dmesg), edac CSV, summary. Sample interval ~1 s.
-- **Worth checking on resume:** does it auto-start at boot? (It did last time because docker restarts
-  `unless-stopped` containers and `/buffer` persists.) If not, start it manually FIRST, then the serve.
+- **Manual, not auto-start** (per decision). Start it with the serve script (`--start`) or
+  `run-powertrip-capture.sh start` before a model-load/debug session.
 
 ## Evidence / next deep-dive pointers
 - Instance catalog: `power-trip-instances.md` (Instances 1–4). Evidence: `evidence/power-trips/`.

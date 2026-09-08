@@ -1,6 +1,6 @@
 # Power-Trip Failure-Event Catalog
 
-Date: 2026-09-05 updated
+Date: 2026-09-07 updated
 Purpose: a running catalog of the **recurring thermal-throttle / sync-flood reset** ("power trip")
 events on this AMD EPYC + 2× RTX PRO 5000 build ("pensive"). Each entry logs: what workload was
 running, the event timeline, the evidence + **how each piece was sourced**, how the debugging went
@@ -13,6 +13,13 @@ more verbose logging/pointers when similar events recur.
 > - `power-debug-collect.sh` — safe, idempotent evidence collector.
 > - `README-ramoffload-research.md` — the workloads that tend to trigger trips (RAM+VRAM offload).
 
+> ⚠️ **2026-09-08 status update:** the prime-suspect DIMM (channel G / MM4) and its NUMA-node half (4 of
+> 8 DIMMs) have been **physically removed for isolation/RMA testing**; memtest86 on the remaining
+> ~512 GB came back clean, and no new trips have occurred in this reduced config so far. Read every
+> "hardware fix pending" status below in that light — see `power-trip-diagnosis.md`'s 2026-09-08 status
+> update for the full reinstall plan (identify the specific bad stick → RMA → reinstall the other 7 →
+> reinstall the replacement). This is a live, changing state, not a completed fix.
+
 ---
 
 ## Index
@@ -24,9 +31,19 @@ more verbose logging/pointers when similar events recur.
 | 3 | 2026-09-05 15:15 | **none** (no reset) | Same load, re-run with live telemetry capture | **No trip**; clean full model load | Capture validated; run succeeded (see note) |
 | 4 | 2026-09-05 16:32 | `0x08000a00` sync-flood + thermal | Same load, after PLE-fix; both GPUs in CUDA-graph warmup | **Confirmed channel G (MM4) DIMM fault**; CECC escalation → UC | Full crash-window telemetry captured; software fixes validated |
 | 5 | 2026-09-06 17:44 | `0x08000a00` sync-flood + thermal | Same load, +tool-choice flags; both GPUs in main weight load | Same channel G (MM4) DIMM fault; EDAC CE not persisted pre-reset | Crash-window telemetry captured; software path still clean |
+| 6 | 2026-09-06 10:13 | `0x00200a00` thermal + ACPI (**no sync-flood bit**) | Qwen3.8-Flash-Next-NVFP4 TP2 serve, ~15 min after serve start (weight-load window) | Anomalous code: thermal/ACPI event OR unlatched sync-flood bit | No capture coverage |
+| 7 | 2026-09-06 16:24 | `0x08000a00` sync-flood + thermal | Same load, ~13 min after serve start (weight-load window) | Same channel G (MM4) DIMM fault; EDAC CE again not persisted | No capture coverage |
+| 8 | 2026-09-07 16:54 | `0x00080a00` **software 0xCF9 reset** + thermal (**NOT a sync flood**) | GLM-5.3-Flash (new model) TP2 vLLM load, `--load-format dummy`, fp8-MoE finalize stage | **Distinct from memory fault** — software-initiated warm reset; only 68 CEs on ch6 | New model attempt; different reset class |
 
-Both recorded trips share the identical reset-reason code, strongly indicating the **same root cause**
-(a marginal DIMM on channel G / slot MM4) rather than two independent faults.
+> ⚠️ **2026-09-07 correction (see "Corrected findings" below):** earlier instances (1–7) were classified
+> as "channel G / MM4 DIMM fault" primarily on the basis of **lifetime cumulative** `ras-mc-ctl --summary`
+> counts. Those counts are a **historic** accumulation (96% landed Sep 3–4) and are **not** per-trip
+> evidence. Per-boot attribution (via the rasdaemon DB) shows the trip boots themselves carried far fewer
+> fresh CEs (see the corrected-accounting table). Re-read the per-instance classifications with that in mind.
+
+All recorded trips share the identical reset-reason code, strongly indicating the **same root cause**
+(a marginal DIMM on channel G / slot MM4) rather than independent faults. Instance 6 is the lone
+register-level exception (`0x00200a00`, no sync-flood bit) — see its entry for the ambiguity.
 
 ---
 
@@ -322,6 +339,82 @@ Sep 05 16:32:06  mce: HEST corrected error threshold limit: 10   (EDAC/HEST arme
 
 ---
 
+## Instance 6 — 2026-09-06 (10:13 local) — POWER TRIP during model load, ANOMALOUS reset code (`0x00200a00`, no sync-flood bit)
+
+### Context
+Box booted 09:08:28 local (boot -3; the preceding reset was `0x00200800` — a clean ACPI power cycle).
+The crash-capture started 09:10:42 local (`/buffer/powertrip/*-20260906-161042*`, UTC in filename) but
+**stopped writing at 09:17** — it was not running for the actual serve launch. The
+`qwen38-flash-serve` container started at **09:58:10** (dockerd journal, `sbJoin ... ep=qwen38-flash-serve`).
+
+### Event
+Boot -3's journal **ends abruptly at 10:13:18** (last line routine tailscaled noise) — **~15 min after
+serve start**, squarely in the weight-load window characteristic of Instances 2/4/5. No shutdown
+sequence, no EDAC/MCE lines. The box sat powered off ~5 h 40 min (next boot 15:53:52).
+
+### Evidence (how sourced)
+- `journalctl --list-boots` → boot -3: Sep 6 09:08:28 → 10:13:18.
+- `journalctl -b -3 | tail` → hard cutoff at 10:13:18, no clean-shutdown trail.
+- `/var/log/kern.log` next-boot line (Sep 06 15:54:06): `Previous system reset reason [0x00200a00]:
+  internal CPU thermal limit was tripped` + `ACPI power state transition occurred`.
+- `/buffer/powertrip` file mtimes → capture last wrote 09:17; **zero telemetry coverage of this trip**.
+
+### Classification / conclusion
+- **Register-level anomaly:** `0x00200a00` = thermal limit + ACPI power transition, **without the `0x08`
+  sync-flood bit** — the only trip in this catalog lacking the memory signature. Two readings:
+  1. a genuine thermal / power-delivery event during the load burst (no UC error occurred), or
+  2. the same DIMM sync-flood where the platform failed to latch the `0x08` bit before reset.
+- Undecidable post-hoc: no capture coverage, no persisted EDAC. The **timing fingerprint** (hard cutoff
+  ~15 min into serve, mid weight-load) matches the Instances 2/4/5 fault class; provisionally grouped
+  with the same root cause, flagged for the code difference.
+
+### Follow-up
+- Do **not** treat a missing `0x08` bit as "not memory" — the Huananzhi reset-reason register is a
+  heuristic APML read; bit-latching across a hard reset is not guaranteed.
+- Repeat of the Instance-5 lesson: **capture must be armed at serve start**, not started and stopped.
+
+---
+
+## Instance 7 — 2026-09-06 (16:24 local) — POWER TRIP during model load (classic `0x08000a00`, no capture)
+
+### Context
+Box booted 15:53:52 local (boot -2). `qwen38-flash-serve` started at **16:11:16** (dockerd
+`sbJoin ... ep=qwen38-flash-serve`). Crash-capture **not running** — the next capture run began
+17:31:18, after the post-trip reboot.
+
+### Event
+Boot -2's journal **cuts off mid-line at 16:24:34** (routine tailscaled NetInfo entry) — **~13 min after
+serve start**, again mid weight-load.
+
+### Reset / evidence
+```
+Sep 06 16:49:46  x86/amd: Previous system reset reason [0x08000a00]:
+                 internal CPU thermal limit was tripped
+                 an uncorrected error caused a data fabric sync flood event
+```
+- Sourced from `/var/log/kern.log` at the next boot (boot -1, 16:49); `journalctl -b -2 | tail` shows
+  the abrupt cutoff.
+- `journalctl -k -b -2` grep for EDAC/MCE → **empty**: per-CE EDAC lines again not persisted pre-reset
+  (same capture gap documented in Instance 5).
+- CE ledger carried into later boots (`ras-mc-ctl --summary`): 2749 total CEs — **channel#6 (G/MM4) =
+  2301 (1367 + 934 across two chip-select ranks, ~84%)**, channel#7 (H/MM2) = 315, channel#5 (F/MM6) = 110.
+  Fault concentration unchanged.
+
+### Classification / conclusion
+- **Same root cause as Instances 1, 2, 4, 5**: marginal DIMM on channel G (slot MM4); CE→UC→sync-flood,
+  triggered by the both-GPU weight streaming + PLE host-RAM traffic.
+- **Intermittency reconfirmed:** after this trip, the same serve recipe came up at 16:49 and served
+  **16 h 42 min clean** (full load, HTTP 200, native 262k context), ending in a *clean* shutdown
+  Sep 7 09:34 (reset reason `0x00200800` — not a trip). The hardware fault is probabilistic per load,
+  not deterministic.
+
+### Follow-up
+- Gating fix unchanged: reseat/replace **MM4**, memtest channel G, downclock RAM.
+- Corollary for future triage: a long clean run afterwards is **not** evidence the DIMM is fixed —
+  trips and 16 h clean serves alternate on the identical recipe.
+
+---
+
 ## Summary of recurring pattern
 - **Signature:** reset reason `0x08000a00` = "internal CPU thermal limit was tripped" + "an uncorrected
   error caused a data fabric sync flood event".
@@ -339,7 +432,12 @@ Sep 05 16:32:06  mce: HEST corrected error threshold limit: 10   (EDAC/HEST arme
   tripped on a subsequent reload during the both-GPU weight-load phase.
 - **The recurring fault fires on ANY sustained heavy-load run** — it is not deterministic per-run; some
   loads complete, others trip. This is the hallmark of marginal hardware (channel G / MM4). Confirmed by
-  Instances 1, 2, 4, and 5 all sharing the identical `0x08000a00` signature.
+  Instances 1, 2, 4, 5, and 7 all sharing the identical `0x08000a00` signature (Instance 6 cut off at the
+  same stage but logged `0x00200a00` without the sync-flood bit — register ambiguity, see its entry).
+- **Sep 6 trips (Instances 6–7) had ZERO capture coverage** — capture was stopped (6) or not yet started
+  (7) at trip time. Additionally, the capture's `edac-*.csv` output is **0 bytes in every run ever**: the
+  EDAC logging inside the crash-capture is broken and must be fixed before it can serve as a
+  CE-rate-based pre-trip recorder.
 
 ---
 
@@ -371,3 +469,93 @@ GPU mem ~41 GB (structure allocated). No sync-flood reset.
 2. **BIOS:** drop GPU PCIe slots to **Gen 3**; RAM **3200 → 2933/2666**; ensure **Resizable BAR /
    Above 4G Decoding**; disable PBO/undervolt; bump **vSOC / VDDG_IOD / VDDG_CCD**; flash latest
    Huananzhi H12D-8D BIOS. Change ONE at a time and re-test the real load with the capture logger armed.
+
+---
+
+## Instance 8 — 2026-09-07 (~16:54 local) — GLM-5.3-Flash load, SOFTWARE reset (distinct class)
+
+### Context
+Trying a **new model** (`zai-org/GLM-5.3-Flash`) via `vllm/vllm-openai:glm53-flash`, container
+`glm53-flash-serve`. Config: TP2, `--load-format dummy`, `--cpu-offload-gb 280`, `--max-model-len 8192`,
+`--max-num-seqs 1`, `--enforce-eager`, `--disable-custom-all-reduce`, `--max-parallel-loading-workers 1`.
+Boot was 15:30:48 → 16:54:31.
+
+### Event / reset reason
+```
+x86/amd: Previous system reset reason [0x00080a00]: internal CPU thermal limit was tripped
+x86/amd: Previous system reset reason [0x00080a00]: software wrote 0x6 to reset control register 0xCF9
+```
+**Not** the `0x08000a00` sync-flood bit. Decoded:
+- bit19 `0x00080000` = **software wrote 0x6 to reset control register 0xCF9** (software-initiated warm reset)
+- bit9  `0x00000200` = CPU internal thermal limit latched bit
+- (no bit27 — **no** "uncorrected error / data-fabric sync flood")
+
+### Where it died (docker log tail)
+```
+... Total CPU offloaded parameters: 148.55
+... Using MoEPrepareAndFinalizeNoDPEPModular      <- last line (fp8-MoE finalize)
+```
+Exited (255) at the tail of load, before serving.
+
+### Per-boot ECC attribution (window-based, NOT cumulative)
+Using the rasdaemon DB, boot -1 (this trip) had **only 68 CEs, all on channel#6 (channel G / MM4)**.
+No channel-0/5/7 CEs in that boot window. This is much smaller than the lifetime 1367/1002 channel-6
+totals, confirming those are historic accumulation, not this trip.
+
+### Classification
+- **Reset class differs** from Instances 1/2/4/5/7 (`0x08000a00` sync flood). This reset was triggered by
+  **software writing the reset-control register** (0xCF9), not an interceptor-uncorrectable memory error.
+- The 68 fresh channel-6 CEs are consistent with ongoing marginal DIMM activity, but **do not by
+  themselves** prove the firmware/software reset was a memory sync-flood.
+- No thermal runaway (tctl ~48.5°C, GPU 66/69°C, GPU ~115 W) despite the latched "thermal" bit.
+- Fair reading: this was likely a software/hardware-initiated warm reset during fp8-MoE finalize of a new
+  (Not-yet-fully-supported) model, coinciding with a small amount of channel-6 CE activity. Do **not**
+  treat it as the classic memory-fault fingerprint.
+
+### Follow-up
+- Re-test GLM-5.3-Flash with capture armed; watch `edac-ce-watch.sh` for a real pre-trip CE ramp.
+- Confirm whether the 0xCF9 reset is a vLLM/kernel panic-then-reboot path or a BMC/watchdog path.
+- Keep the DIMM on channel G / MM4 as a real (but long-running, not per-trip) suspect pending memtest/RMA.
+
+---
+
+## Corrected findings (2026-09-07) — cumulative vs per-trip ECC attribution
+
+**Problem:** the earlier analysis (Instances 1–7) leaned on `ras-mc-ctl --summary` / `rasdaemon`
+**lifetime cumulative** counts to attribute each trip to "channel G / MM4". Those totals are *not*
+per-trip evidence.
+
+**What `ras-mc-ctl --summary` actually reports:** cumulative corrected-ECC events **since the rasdaemon
+DB was created** (earliest 2026-08-21). It is repeated verbatim on every boot and in every
+`edac-ce-watch` alert, which made it *appear* that each trip produced thousands of new CEs. It does not.
+
+**Per-day breakdown of channel#6 CEs (from rasdaemon DB timestamps):**
+
+| Date | channel#6 CEs |
+|---|---|
+| 2026-08-23 | 6 |
+| 2026-08-27 | 2 |
+| **2026-09-03** | **1100** |
+| **2026-09-04** | **1186** |
+| 2026-09-05 | 5 |
+| 2026-09-06 | 2 |
+| 2026-09-07 | 68 |
+
+- **~2286 of 2369 channel-6 CEs (96%) occurred on just two days — Sep 3–4** (during a `glm52-sglang`
+  run that became a zombie container). That is a single historic burst, not a per-trip signature.
+- The individual **trip boots** carried little fresh CE:
+  - Sep 6 sync-flood trip (boot -3): **0** fresh channel-6 CEs in that boot.
+  - Sep 7 GLM trip (boot -1): **68** fresh channel-6 CEs.
+
+**Implication:** the huge channel-6 totals are **historic residue**, not proof each trip was a memory
+sync-flood. The DIMM on channel G / MM4 is a genuine long-run suspect (highest historical CE), but each
+trip must be attributed on its **own boot-window CE count + its own reset-reason code**, not on the
+lifetime total. Only reset code `0x08000a00` (bit27) is direct evidence of an uncorrectable memory
+error; `0x00080a00` (bit19) is a software 0xCF9 reset; `0x00200a00`/`0x00200800` (bit21) are ACPI/power.
+
+**Tooling added for correct accounting:**
+- `recipe/ecc-per-window.sh` — per-channel CE for a date window / boot / lifetime (rasdaemon DB).
+- `recipe/reset-reason-decoder.sh` — decodes the reset-reason bits (`--history`, or a 0xNN code).
+- `recipe/edac-ce-watch.sh` — rewritten to alert on **per-interval new-CE deltas**, not cumulative totals.
+- `recipe/diag-dimm-fault.sh` — now separates cumulative `[1]` from per-boot `[6]`, and decodes reset
+  reasons in `[5]`.

@@ -1,13 +1,22 @@
 # System Specifications — build "pensive"
 
-Date: 2026-09-03 (last verified against live hardware)
+Date: 2026-09-08 (last verified against live hardware; RAM section is a MOVING TARGET right now — see
+status note below, and re-verify with `numactl -H` / `free -h` before relying on any figure in §3)
 Scope: machine hardware/inference-capability assessment that informs what models can run locally on
 this build. The system's actual, live spec snapshot lives in `power-debug-collect.sh` output; this file
 is the curated reference for planning.
 
-> Hardware caution: this build has a known, recurring **data-fabric sync-flood reset** (`0x08000a00`)
-> traced to a marginal DIMM on channel G / slot MM4. See `power-trip-diagnosis.md` and
-> `power-trip-instances.md`. Keep `powertrip-capture` running to capture events.
+> Hardware status (2026-09-08): the marginal DIMM on channel G / slot MM4 (see `power-trip-diagnosis.md`,
+> `power-trip-instances.md`) has been **physically removed for isolation/RMA testing**, along with the
+> rest of its NUMA-node half (4 of 8 DIMMs pulled — nodes 2 and 3 are currently memory-less). memtest86
+> on the remaining ~512 GB came back clean. This is a **TEMPORARY configuration**: plan is to pin down
+> the specific bad stick, RMA it, then reinstall the other 7 known-good sticks (an interim ~7-DIMM state
+> until the replacement arrives), then return to the full 8-DIMM / 1 TiB config. §3 below reflects the
+> current testing state — expect it to change at least twice more. One concrete side effect already hit
+> this session: with GPU0's local NUMA node (3) memory-less, NCCL's `ncclCuMemHostEnable()` host-memory
+> probe segfaults on launch; `recipe/serve-qwen38-flash-next-nvfp4.sh` now auto-detects this (see §1
+> topology note) and sets `NCCL_CUMEM_HOST_ENABLE=0` accordingly — no manual flag-flipping needed as the
+> DIMM count changes. Keep `powertrip-capture` running during re-test.
 
 ---
 
@@ -49,18 +58,34 @@ vLLM CPU offload (`--cpu-offload-gb`) can extend VRAM for very large models as a
 > with `NCCL_P2P_DISABLE=1` (or `NCCL_P2P_LEVEL`). NPS1 would collapse the socket to 1 NUMA node but
 > **does not fix P2P** and would interleave the failing channel G into all traffic. See
 > `why-databric-syncflood-not-interceptable.md` and the topology discussion in the research docs.
+>
+> **Live caveat (2026-09-08, while DIMMs are pulled):** GPU0's local node (3) is currently memory-less
+> (see hardware-status banner above). NCCL's host-cuMem registration probe (`ncclCuMemHostEnable` →
+> `cuMemCreate`) segfaults at `ncclCommInitRank` when a GPU's local NUMA node has 0 MB — it doesn't fall
+> back gracefully. `recipe/serve-qwen38-flash-next-nvfp4.sh` auto-detects this per-launch (checks each
+> GPU's `/sys/bus/pci/devices/<addr>/numa_node` against that node's live meminfo) and sets
+> `NCCL_CUMEM_HOST_ENABLE=0` only when needed, so it self-adjusts as DIMMs go back in — no doc/flag
+> update required when the RAM config changes.
 
 ## 3. Memory (host RAM)
 
-| Property | Value |
-|---|---|
-| Total | 1.0 TiB (8 × 128 GB Micron DDR4-3200 8-rank RDIMM) |
-| Available | ~925 GiB |
+**Currently in flux — re-verify live before relying on any number here** (`numactl -H` for per-node
+size/NUMA-node population, `free -h` for total/available):
 
-Plenty of RAM. Realistically not the capacity constraint; can RAM-offload or use huge KV caches. 1 TiB
-also means models kept in RAM can be mmap-loaded. **But** the memory subsystem is the source of the
-recurring fault: the marginal DIMM on **channel G (slot MM4)** throws corrected-ECC that escalates to an
-uncorrectable → sync-flood reset under heavy load.
+| Property | Nameplate (original, 8 DIMMs) | **Live now (2026-09-08, isolation testing)** |
+|---|---|---|
+| Total | 1.0 TiB (8 × 128 GB Micron DDR4-3200 8-rank RDIMM) | **~499 GiB (4 DIMMs populated)** |
+| NUMA nodes with memory | 4 (0–3) | **2 (nodes 0, 1) — nodes 2 and 3 are memory-less** |
+| Available | ~925 GiB | **~490 GiB (see live `free -h`)** |
+
+Plenty of RAM either way — not the capacity constraint for the model sizes this box targets; can
+RAM-offload or use huge KV caches. **But** the memory subsystem is the source of the recurring fault:
+the marginal DIMM on **channel G (slot MM4)** threw corrected-ECC that escalated to an uncorrectable →
+sync-flood reset under heavy load. That DIMM (and its NUMA-node half) is **currently pulled** for
+isolation/RMA testing — memtest86 on the remaining ~512 GB came back clean. Plan: identify the specific
+bad stick, RMA it, reinstall the other 7 known-good sticks (interim ~896 GiB / uneven NUMA population),
+then return to the full 1 TiB / 8-DIMM config once the replacement arrives. See the hardware-status
+banner at the top of this file and `power-trip-diagnosis.md` for the up-to-date plan.
 
 ## 4. Storage
 
