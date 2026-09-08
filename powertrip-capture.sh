@@ -116,11 +116,18 @@ klog_on(){
 
 # Periodic EDAC / rasdaemon tally snapshot (CE/UE per DIMM/channel) --> CSV
 # Re-reads the rasdaemon DB so we can correlate ECC growth with load.
+# NOTE: querying the live DB in-place hits "database is locked" against rasdaemon's own writer and
+# silently produces an empty CSV (this was an open, unexplained bug — see power-trip-instances.md).
+# Copy to a tmp file first, like the sibling tools do (recipe/edac-ce-watch.sh, recipe/ecc-per-window.sh).
 edac_on(){
+  local tmp="/tmp/.powertrip-capture-edac-copy.db"
   while true; do
-    sqlite3 /var/lib/rasdaemon/ras-mc_event.db \
-      "SELECT datetime(time,'unixepoch'),COALESCE(label,'-'),err_type FROM mc_event ORDER BY id DESC LIMIT 200;" \
-      >> "$EDACLOG" 2>/dev/null
+    if cp /var/lib/rasdaemon/ras-mc_event.db "$tmp" 2>/dev/null; then
+      sqlite3 "$tmp" \
+        "SELECT datetime(time,'unixepoch'),COALESCE(label,'-'),err_type FROM mc_event ORDER BY id DESC LIMIT 200;" \
+        >> "$EDACLOG" 2>/dev/null
+      rm -f "$tmp"
+    fi
     sleep 5
   done
 }

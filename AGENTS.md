@@ -7,13 +7,27 @@
 ## 1. TL;DR — what we're investigating
 
 - This machine ("pensive") **hard-resets under heavy memory/fabric load** (e.g. big LLM weight loads).
-- Reset signature: **`0x08000a00`** = "internal CPU thermal limit was tripped" + "an uncorrected error
-  caused a data fabric sync flood event."
-- **Root cause (confirmed via ECC):** a **marginal/failing DIMM on channel G — slot MM4** (secondary
-  MM2/channel H, MM6/channel F). Corrected-ECC (CE) accumulates there by the thousands and escalates to
-  an **uncorrectable (UE)** → data-fabric sync-flood → hard reset.
-- This is a **hardware fault, not a software bug.** Software can only reduce the *load*, not fix it.
-- **EDUCAIONAL doc:** why the reset can't be intercepted → `why-databric-syncflood-not-interceptable.md`.
+- A reset prints an **AMD "Previous system reset reason"** register value. There are **3 distinct
+  classes seen** — decode with `recipe/reset-reason-decoder.sh`:
+  - `0x08000a00` (bit27) = **uncorrected error → data-fabric sync flood** + bit9 thermal. This is the
+    **memory-fault** signature.
+  - `0x00080a00` (bit19) = **software wrote 0x6 to reset-control register 0xCF9** + bit9 thermal. A
+    **software-initiated warm reset — NOT a memory sync-flood** (e.g. the 2026-09-07 GLM-5.3 trip).
+  - `0x00200a00` / `0x00200800` (bit21) = **ACPI power-state transition** (± bit9 thermal). A
+    power/firmware reset (benign / not memory).
+- **Long-run suspect:** a **marginal/failing DIMM on channel G — slot MM4** (secondary MM2/channel H,
+  MM6/channel F). Its **lifetime cumulative** CE count is by far the highest.
+- ⚠️ **Do NOT use lifetime `ras-mc-ctl --summary` totals as per-trip evidence.** Those counts are
+  **historic accumulation** (96% of channel-6 CEs landed on a single Sep 3–4 burst, not on the trips).
+  Attribute each trip using **per-boot window** CE counts (`recipe/ecc-per-window.sh`) + the reset-reason
+  bitclass above.
+- This is a **hardware fault potential, not a software bug.** Software can only reduce the *load*.
+- **EDUCATIONAL doc:** why the reset can't be intercepted → `why-databric-syncflood-not-interceptable.md`.
+- **Status (2026-09-08): the suspect DIMM (channel G / MM4) and its NUMA-node half have been physically
+  removed for isolation/RMA testing** (memtest86 clean on the remaining ~512 GB). This is temporary —
+  see `SYSTEM-SPEC.md`'s hardware-status banner and `power-trip-diagnosis.md` for the reinstall plan
+  (RMA the bad stick, put the other 7 back, then the replacement). RAM/NUMA figures below are stale the
+  moment this changes; treat `SYSTEM-SPEC.md` as the source of truth and re-verify with `numactl -H`.
 
 ## 2. Hardware context (summary)
 
@@ -21,7 +35,7 @@
 |---|---|
 | CPU | AMD EPYC 7663, 56c/112t, 1 socket, **4 NUMA nodes (NPS4)** |
 | GPU | 2× NVIDIA RTX PRO 5000 72 GB Blackwell (`sm_120`), **no NVLink, cross-NUMA** (GPU0=node3, GPU1=node0) |
-| RAM | 1 TiB (8× 128 GB Micron DDR4-3200 8-rank RDIMM), **marginal DIMM on channel G / MM4** |
+| RAM | 1 TiB nameplate (8× 128 GB Micron DDR4-3200 8-rank RDIMM); **live now ~499 GiB / 4 DIMMs** — marginal DIMM (channel G / MM4) pulled for isolation testing, see status note above and `SYSTEM-SPEC.md` §3 for current figures |
 | Storage | `/trunk/ai` ZFS (17T, ~82% full), `/buffer` NVMe LVM, `/` ext4 |
 | PSU | Seasonic Prime 1600W (NOT the constraint) |
 | Software | Docker + vLLM (patched) + capture logger; NVIDIA Container Toolkit |
@@ -37,8 +51,10 @@ GPU↔GPU P2P is impossible → NCCL must use `NCCL_P2P_DISABLE=1` (or `NCCL_P2P
 | `power-trip-instances.md` | **Failure-event catalog, Instances 1–5** + isolation test; every trip logged with evidence. |
 | `recipe/MODEL-CATALOG.md` | Model catalog + fit verdicts + Recipe A/B. |
 | `recipe/serve-qwen38-flash-next-nvfp4.sh` | One-shot server launcher (arms capture + EDAC watch + power cap + serve). |
-| `recipe/edac-ce-watch.sh` | Corrected-ECC **pre-trip alert** monitor. |
-| `recipe/diag-dimm-fault.sh` | DIMM fault diagnostic → **warranty/RMA-ready** output. |
+| `recipe/edac-ce-watch.sh` | Corrected-ECC **pre-trip alert** monitor (**per-interval new-CE delta**, not cumulative). |
+| `recipe/diag-dimm-fault.sh` | DIMM fault diagnostic → **warranty/RMA-ready** output (separates cumulative vs per-boot). |
+| `recipe/ecc-per-window.sh` | **Window-based** per-channel CE accounting (per day/boot/lifetime) from rasdaemon DB. |
+| `recipe/reset-reason-decoder.sh` | Decodes AMD "Previous system reset reason" bitfield (3 reset classes). |
 | `powertrip-capture-readme.md` | Crash-capture telemetry logger docs. |
 | `README-ramoffload-research.md` | RAM+VRAM offload research + empirical results. |
 | `why-databric-syncflood-not-interceptable.md` | Educational: CE vs UE, why a fabric flood can't be intercepted. |
@@ -82,7 +98,11 @@ Built into `recipe/serve-qwen38-flash-next-nvfp4.sh` (patched image `vllm/vllm-o
 
 **Software blockers that were fixed (all baked in):** NCCL cross-NUMA/no-NVLink P2P hang → `NCCL_P2P_DISABLE=1`;
 FP8-PLE selector bug (vLLM issue #54765) → patched `ple_layer.py` + `VLLM_QWEN38_PLE_FP8_SCALE=1`;
-CUSTOM all-reduce CUDA error → `--disable-custom-all-reduce`; `pidfd_getfd` permission → `SYS_PTRACE` caps.
+CUSTOM all-reduce CUDA error → `--disable-custom-all-reduce`; `pidfd_getfd` permission → `SYS_PTRACE` caps;
+**NCCL host-cuMem segfault on a memory-less GPU-local NUMA node** (`ncclCuMemHostEnable`/`cuMemCreate`,
+hit 2026-09-08 after the DIMM pull left GPU0's node memory-less) → the script auto-detects per-launch
+and sets `NCCL_CUMEM_HOST_ENABLE=0` only when needed (see `SYSTEM-SPEC.md` §1 topology note); this is
+NUMA-topology-driven, not hardcoded, so it self-adjusts as DIMMs are reinstalled.
 
 ## 6. How to investigate a NEW trip (given limited/no capture)
 
@@ -95,15 +115,19 @@ journalctl --list-boots | tail -8
 
 # 2. THE reset reason (primary evidence)
 grep -a "Previous system reset" /var/log/syslog /var/log/kern.log | tail -6
-#   0x08000a00 = MEMORY fault (uncorrected -> sync flood). 0x00200a00 = ACPI+thermal (NOT memory).
+bash recipe/reset-reason-decoder.sh --history   # decode each code (3 classes)
+#   0x08000a00 = MEMORY fault (bit27 sync flood). 0x00080a00 = software 0xCF9 warm reset.
+#   0x00200a00/0x00200800 = ACPI/power transition (NOT memory).
 
 # 3. ECC / MCE evidence from the boot that tripped (boot -1 = previous boot)
 journalctl -k -b -1 | grep -aiE "EDAC MC0:.*CE on|Machine check|CECC|UECC|uncorrect|sync flood|channel#6|syndrome"
 #   (note: CEs may not be persisted if the reset was fast; channel#6 = channel G = MM4)
 
-# 4. Per-channel CE tally (post-mortem / current)
-ras-mc-ctl --summary     # "Corrected on DIMM ... channel#6 ... errors: <count>"
-bash recipe/diag-dimm-fault.sh   # full warranty-ready output (maps EDAC channel -> slot)
+# 4. Per-channel CE tally — USE WINDOW / PER-BOOT, not lifetime
+bash recipe/ecc-per-window.sh --boot -1   # fresh CEs in the tripped boot ONLY
+bash recipe/ecc-per-window.sh --all       # lifetime (for context; NOT per-trip evidence)
+ras-mc-ctl --summary                      # lifetime cumulative (historic; NOT proof per-trip)
+bash recipe/diag-dimm-fault.sh            # full warranty-ready output (separates cumulative vs per-boot)
 
 # 5. What stage was the model load at? (if server was running)
 grep -a -E "Loading safetensors|Model loading took|PLE weight loading complete|registered" /var/tmp/serve.log

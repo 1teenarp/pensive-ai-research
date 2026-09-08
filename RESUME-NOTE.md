@@ -27,8 +27,18 @@ PLE registration → CUDA-graph capture):
 3. **CUSTOM all-reduce CUDA error** — add `--disable-custom-all-reduce` (falls back to PYNCCL).
 4. **pidfd_getfd permission** — add `--cap-add SYS_PTRACE --security-opt seccomp=unconfined
    --security-opt apparmor=unconfined`.
+5. **NCCL host-cuMem segfault on a memory-less GPU-local NUMA node** (2026-09-08, after 4 DIMMs were
+   pulled for isolation/RMA testing — see `SYSTEM-SPEC.md` hardware-status banner) — `ncclCuMemHostEnable`
+   segfaults in `cuMemCreate` instead of degrading gracefully when a GPU's local NUMA node has 0 MB.
+   Fixed via a NUMA-topology auto-detect in the script, which sets `NCCL_CUMEM_HOST_ENABLE=0` only when
+   needed. **This is NUMA-state-dependent, not a static flag** — see the caveat on the command below.
 
 ### The exact serve command (patched image) — CURRENT BEST (native context, CUDA graphs)
+> ⚠️ **Don't hand-copy this raw command while the DIMM testing is in progress (see `SYSTEM-SPEC.md`
+> banner).** It's missing blocker #5's conditional `NCCL_CUMEM_HOST_ENABLE=0` — pasting it as-is will hit
+> the cuMem segfault whenever a GPU's local NUMA node is currently memory-less. **Use
+> `recipe/serve-qwen38-flash-next-nvfp4.sh` instead** — it derives this flag live from the actual NUMA
+> topology every launch, so it stays correct as DIMMs go back in. This block is kept for reference only.
 ```bash
 MODEL=/trunk/ai/huggingface/models/nvidia/Qwen3.8-Flash-Next-NVFP4
 docker run -d --name qwen38-flash-serve --gpus all --shm-size 16g --ipc=host \

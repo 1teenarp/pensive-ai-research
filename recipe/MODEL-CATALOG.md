@@ -1,9 +1,10 @@
 # Model Catalog & Recipes — "pensive" build
 
-Date: 2026-09-06
+Date: 2026-09-06 (RAM figure below is nameplate; **live RAM is currently reduced for DIMM isolation
+testing** — see `SYSTEM-SPEC.md`'s hardware-status banner, do not assume 1 TiB is available right now)
 Purpose: a catalog of models present under `/trunk/ai/huggingface/models/`, with the **serving
 settings that are known to work (or worked in the past)** on this box (2× RTX PRO 5000 72 GB Blackwell
-= ~144 GB VRAM, 1 TiB RAM, EPYC 7663 56c, single socket 4-NUMA (NPS4)).
+= ~144 GB VRAM, 1 TiB RAM nameplate, EPYC 7663 56c, single socket 4-NUMA (NPS4)).
 
 > Recipe launchers live in the sibling `recipe/` folder. The launch script that reproduces the
 > currently-working server is `recipe/serve-qwen38-flash-next-nvfp4.sh`.
@@ -40,6 +41,10 @@ settings that are known to work (or worked in the past)** on this box (2× RTX P
 - Docker opts: `--cap-add SYS_PTRACE`, `--security-opt seccomp=unconfined/apparmor=unconfined`
   (for the PLE-offload `pidfd` handshake).
 - Host: GPU power cap `nvidia-smi -pl 250` (reduces fabric draw on this marginal DIMM).
+- **While DIMM isolation testing is in progress** (see `SYSTEM-SPEC.md` banner): the script also
+  auto-detects a memory-less GPU-local NUMA node and sets `NCCL_CUMEM_HOST_ENABLE=0` when needed, to
+  avoid a `cuMemCreate` segfault at NCCL init. Launch via the script, not a hand-copied command, so this
+  stays correct as DIMMs are added back.
 
 **Measured performance (native context):**
 - **~39–55 tok/s** decode with CUDA graphs (~4× faster than `--enforce-eager` ~12 tok/s).
@@ -100,7 +105,7 @@ Sizes are on-disk. "Fit" is based on ~128–135 GB usable VRAM (single process) 
 | **deepseek-ai/DeepSeek-V4-Pro** | 786 GB | MoE | huge | ❌ multi-node/offload |
 | **nvidia/DeepSeek-V4-Pro-NVFP4** | 819 GB | MoE NVFP4 | huge | ❌ |
 | **nvidia/GLM-5.2-NVFP4** | 426 GB | MoE NVFP4, sparse-attn | huge | ❌ (no Blackwell sparse-MLA backend) |
-| **zai-org/GLM-5.3-Flash** | 305 GB | MoE | huge | ❌ |
+| **zai-org/GLM-5.3-Flash** | 305 GB | MoE 320B/18B FP8, KDA+sparse-MLA, 1M ctx | huge | ⚠️ RAM-offload only (~1–2 tok/s TP2+MTP; needs vllm glm53-flash image) — see `GLM-53-FLASH-RECIPE.md` |
 | **madeby561/GLM-5.2-MXFP8-NVFP4-NF3-Hybrid** | 336 GB | MoE | huge | ❌ |
 | **nvidia/Kimi-K2.7-Code-NVFP4** | 543 GB | MoE | huge | ❌ |
 | **moonshotai/Kimi-K2.7-Code** | 546 GB | MoE | huge | ❌ |
@@ -131,5 +136,7 @@ The box has a **recurring data-fabric sync-flood reset** (`0x08000a00`, see
 `power-trip-instances.md`) traced to a failing/marginal DIMM on **channel G / slot MM4**, aggravated by
 high host-RAM/fabric traffic (large MoE weight-loads, PLE host-RAM offload, RAM+VRAM offload serving).
 - **Mitigations in use:** burst-reduction flags, PLE CPU offload, GPU power cap (250 W), `NCCL_P2P_DISABLE=1`.
-- **Real fix (pending):** memtest86 on channel G, RAM downclock (3200→2933/2666), GPU PCIe → Gen3.
+- **Status (2026-09-08):** the suspect DIMM and its NUMA-node half are **physically removed** for
+  isolation/RMA testing (memtest86 clean on the remaining ~512 GB) — see `SYSTEM-SPEC.md` and
+  `power-trip-diagnosis.md` for the live status and reinstall plan. Not yet the final fix.
 - Keep `powertrip-capture` running (auto-restarts) so any future trip is captured.
