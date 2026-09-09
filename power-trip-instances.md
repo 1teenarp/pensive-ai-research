@@ -34,6 +34,8 @@ more verbose logging/pointers when similar events recur.
 | 6 | 2026-09-06 10:13 | `0x00200a00` thermal + ACPI (**no sync-flood bit**) | Qwen3.8-Flash-Next-NVFP4 TP2 serve, ~15 min after serve start (weight-load window) | Anomalous code: thermal/ACPI event OR unlatched sync-flood bit | No capture coverage |
 | 7 | 2026-09-06 16:24 | `0x08000a00` sync-flood + thermal | Same load, ~13 min after serve start (weight-load window) | Same channel G (MM4) DIMM fault; EDAC CE again not persisted | No capture coverage |
 | 8 | 2026-09-07 16:54 | `0x00080a00` **software 0xCF9 reset** + thermal (**NOT a sync flood**) | GLM-5.3-Flash (new model) TP2 vLLM load, `--load-format dummy`, fp8-MoE finalize stage | **Distinct from memory fault** — software-initiated warm reset; only 68 CEs on ch6 | New model attempt; different reset class |
+| — | 2026-09-08 00:06 & 01:41 local | `0x00080800`/`0x00080a00` software 0xCF9 reset (×2, same signature as #8) | Unknown — box was unattended overnight between Instance 8's reset (19:41) and the next morning's manual DIMM-pull reboot (07:18) | **Newly found 2026-09-08, not yet investigated** — no capture coverage (capture was already quiet before Instance 8 itself), no docker container evidence checked | Undiagnosed; flagged for follow-up, not yet root-caused |
+| 9 | 2026-09-08 22:46 local | **No reset** — clean host-wide Linux OOM kill (kernel-logged, `journalctl -k`) | GLM-5.3-Flash TP2 `--dummy` rerun, ~13 min after launch, during engine-core distributed startup / CPU-offload allocation (before reaching Instance 8's fp8-MoE-finalize stage) | **RAM/NUMA capacity, not a fault** — global OOM-killer sacrificed unrelated host processes (`dbus-daemon`, a user `systemd` session) before killing the vLLM worker; EDAC clean, no CE ramp | Root-caused; see full write-up below |
 
 > ⚠️ **2026-09-07 correction (see "Corrected findings" below):** earlier instances (1–7) were classified
 > as "channel G / MM4 DIMM fault" primarily on the basis of **lifetime cumulative** `ras-mc-ctl --summary`
@@ -516,6 +518,98 @@ totals, confirming those are historic accumulation, not this trip.
 - Re-test GLM-5.3-Flash with capture armed; watch `edac-ce-watch.sh` for a real pre-trip CE ramp.
 - Confirm whether the 0xCF9 reset is a vLLM/kernel panic-then-reboot path or a BMC/watchdog path.
 - Keep the DIMM on channel G / MM4 as a real (but long-running, not per-trip) suspect pending memtest/RMA.
+
+**2026-09-08 update:** `recipe/serve-glm-53-flash.sh` was found to have a real capture-coverage gap
+matching Instances 3/6/7: `powertrip-capture`'s dmesg session went quiet ~27 min into this run, ~2h39m
+before the actual death, so the fp8-MoE-finalize crash itself has no kernel log. Fixed this session:
+(1) `arm_safety()` now checks klog mtime and warns if capture has gone stale, not just whether the
+container is "running"; (2) the launcher also gained the NUMA/NCCL memory-less-node guard from the
+Qwen recipe (moot for *this* instance — all 8 DIMMs were populated at the time — but load-bearing for
+any rerun today, since the box is now in the reduced-DIMM state with GPU0 on a memory-less node); (3) a
+`--dummy`-at-TP2 offload-sizing bug (was requesting the TP1 default of 280 GB/worker instead of 150) was
+also fixed. `ipmitool sel list`/`mc watchdog get` still not run (needs interactive sudo) — the
+BMC-vs-NMI-watchdog question in the first bullet above is still open. See
+`recipe/GLM-53-FLASH-RECIPE.md` §0 for the full writeup.
+
+---
+
+## Instance 9 — 2026-09-08 (~22:46 local) — GLM-5.3-Flash `--dummy` rerun, clean host-wide OOM (NOT a power trip)
+
+### Context
+Rerun of the GLM-5.3-Flash TP2 `--dummy` smoke test (see Instance 8, `recipe/GLM-53-FLASH-RECIPE.md` §0),
+this time with three fixes in place: the NUMA/NCCL memory-less-node guard (ported from the Qwen
+recipe), correct TP2 offload scaling (150 GB/worker, not the TP1 default of 280), and a capture-liveness
+check in `arm_safety()`. Also different from Instance 8 in one major way: the box is now in the
+**interim isolation-testing RAM config** (~499 GiB, only NUMA nodes 0–1 populated, nodes 2–3
+memory-less — Instance 8 ran under the still-full 8-DIMM/1-TiB config). Pre-flight was clean: Qwen
+stopped, GPUs free, 362 GiB RAM available, capture and EDAC watch both running.
+
+### Event
+- NCCL init passed cleanly under the reduced-NUMA topology — **the new guard worked**:
+  `gpu 00000000:01:00.0 -> numa node 3 (0 MB local memory)` detected, `NCCL_CUMEM_HOST_ENABLE=0` forced
+  automatically, no segfault.
+- Reached the same point as Instance 8 (`FLASHINFER_MLA_SPARSE_SM120` sparse-MLA backend, `DEEPGEMM`
+  MoE backend selected) — then died **earlier** than Instance 8, during engine-core distributed startup
+  / CPU-offload buffer allocation (`UVAOffloader`), ~13 min after launch. Never reached Instance 8's
+  fp8-MoE-finalize stage.
+- Container exited: `Status=exited ExitCode=1 OOMKilled=true`. **No host reset** — `uptime -s` unchanged
+  throughout.
+
+### Root cause (fully evidenced, no gaps this time)
+`journalctl -k --since ... --until ...` for the exact crash window shows a **genuine, severe,
+global** Linux OOM event (`cpuset=... global_oom`), not a container-scoped cgroup limit:
+```
+Sep 08 22:46:40  dcgm-exporter invoked oom-killer ...
+Sep 08 22:46:41  Out of memory: Killed process 8301 (dbus-daemon) ...
+Sep 08 22:46:41  Out of memory: Killed process 7847 (systemd) ...        [user session systemd]
+Sep 08 22:46:41  Out of memory: Killed process 7851 ((sd-pam)) ...
+Sep 08 22:46:41  pt_nccl_watchdg invoked oom-killer ...
+Sep 08 22:46:41  Out of memory: Killed process 3377512 (VLLM::Worker_TP) total-vm:753559988kB ...
+Sep 08 22:46:41  Cannot map memory with base addr 0x796eb2000000 and size of 0x100000 pages
+Sep 08 22:46:41  NVRM: failed to copy out ioctl data
+```
+The kernel killed **unrelated host processes** (dbus, a user systemd session) before finally killing
+the vLLM worker — proof this was real, severe memory pressure, not a small overshoot of a single
+cgroup limit. The two `VLLM::Worker_TP` processes showed `total_vm` ~718 GB each (mostly virtual
+address space — UVA/pinned-memory reservations for the offloaded experts) with hundreds of MB of real
+page-table overhead each, and the NVIDIA driver itself started failing memory-mapping ioctls
+(`Cannot map memory...`, `NVRM: failed to copy out ioctl data`) — a sign the box was critically low on
+free host RAM, not just "a bit over budget."
+
+**Likely mechanism:** GPU0's local NUMA node (3) is memory-less right now, so its ~150 GB CPU-offload
+buffer cannot be allocated locally — it must land on a remote node, piling onto nodes 0/1 (which
+together hold ~490 GiB) alongside GPU1's own ~150 GB offload (GPU1 sits on node 0). With base host
+usage (~137 GiB) and page-table/shared-memory overhead for the huge UVA mappings on top, the nominal
+"150×2=300 GiB fits in 362 GiB available" budget did not leave enough real headroom once NUMA locality
+skewed the actual placement. This is exactly the risk flagged (as a prediction) in
+`recipe/GLM-53-FLASH-RECIPE.md` §2's RAM caveat, now **confirmed empirically**.
+
+### What worked (validating this session's earlier fixes)
+- **Capture stayed alive the entire run** — `klog-20260908-151528.log` was still being written *after*
+  the crash (23:01, vs. crash at 22:46), unlike Instance 8 where capture went dark ~27 min in. The
+  liveness check + this simply being a shorter-lived failure both helped; either way, the gap that hid
+  Instance 8's cause did **not** recur.
+- **No EDAC/CE ramp** (`edac-ce-watch.sh --status`: empty) — this failure has nothing to do with the
+  channel-G/MM4 DIMM.
+- **NUMA/NCCL guard worked as designed** — no segfault at `ncclCommInitRank` despite GPU0's memory-less
+  local node.
+
+### Classification / conclusion
+- **Not a power trip, not a DIMM issue.** A capacity problem: the current reduced-DIMM/reduced-NUMA
+  interim config doesn't have enough *effectively-placed* host RAM for this model's CPU-offload
+  footprint, even though the raw `free -h` total looked plausible.
+- Distinct from, and did not reach, Instance 8's still-unresolved fp8-MoE-finalize `0xCF9` reset — that
+  question remains open and untested by this run.
+
+### Follow-up
+- Don't retry `--dummy`/`--serve` as-is under the current RAM config. Options: (a) wait for the DIMM
+  reinstall (restores nodes 2/3, giving GPU0 local memory and ~896 GiB+ total); (b) explicitly NUMA-bind
+  the container's offload to nodes 0/1 and lower `CPU_OFFLOAD_GB` well below 150/worker to leave real
+  headroom (e.g. ~100/worker) for page-table/shmem overhead; (c) try TP1 instead of TP2 (single 280 GB
+  offload budget, still on the memory-less-node GPU though, so may not help without also NUMA-binding).
+- The two newly-noticed, previously-undocumented Sep 8 00:06/01:41 CF9 resets (see Index table) are
+  still unexplained — no capture coverage, cause unknown. Worth a dedicated look before assuming they're
+  related to either GLM attempt.
 
 ---
 
