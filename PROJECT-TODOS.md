@@ -58,6 +58,27 @@ See `powertrip-capture-readme.md`. Plus `recipe/edac-ce-watch.sh` for a correcte
 - `thermald` won't run on this AMD EPYC (unsupported) → no OS thermal governor; the CPU relies on its internal SMU limit.
 - Determine whether the thermal trip is a real overtemp under sustained all-core+GPU, a cooling shortfall, or a side-effect of the sync-flood reset; decide on CPU power/thermal cap or cooling improvements.
 
+### B4. Investigate the software `0xCF9` reset class — TODO
+Distinct failure signature first seen with GLM-5.3-Flash (see `power-trip-instances.md` Instance 8):
+reset reason `0x00080a00`/`0x00080800` = **software wrote 0x6 to reset control register 0xCF9** +
+thermal-limit bit — explicitly **not** the `0x08000a00` sync-flood/channel-G-DIMM signature that
+Instances 1/2/4/5/7 share. First occurrence died at the fp8-MoE-finalize stage of a GLM-5.3-Flash
+`--dummy` TP2 load; two more of the same signature turned up later, undocumented until found in this
+session (2026-09-08 00:06 and 01:41 local), cause unknown, no capture coverage for any of the three.
+- **Root cause open — two live hypotheses, neither confirmed:**
+  1. Kernel panic → auto-reboot path (`nmi_watchdog` is enabled on this host — `cat
+     /proc/sys/kernel/nmi_watchdog` = 1 — an NMI-watchdog-triggered panic during a CUDA-kernel hang
+     would plausibly write `0xCF9` on its own reboot path).
+  2. BMC/IPMI hardware watchdog. **Not yet checked** — `ipmitool sel list` / `ipmitool mc watchdog get`
+     both need interactive sudo, which this session doesn't have non-interactively.
+- **If it recurs:** immediately capture (before the next reboot overwrites state) —
+  `journalctl -k -b -1` for a panic backtrace, `ipmitool sel list` for a BMC-logged watchdog event,
+  and cross-check `powertrip-capture`'s klog file was actually still writing at the time (per the
+  Instance 8/3/6/7 capture-gap pattern — verify with the klog-liveness check now built into
+  `recipe/serve-glm-53-flash.sh`'s `arm_safety()` before trusting "no capture" as "nothing happened").
+- **When to prioritize:** low urgency while GLM-5.3-Flash itself is blocked on RAM capacity (Instance 9);
+  revisit once that's resolved and Stage 1 is retried, since that's the natural next chance to reproduce it.
+
 ### B3a. Reusable debug artifacts (already created)
 - `power-debug-collect.sh` — safe, idle evidence collector (reset reason, per-channel ECC tally, CPU/GPU temps, freq/governor, package power, containers, DMI map).
 - `power-trip-diagnosis.md` — findings, DIMM slot↔channel map, and the 5-step runbook (collect → DMI → ECC tally → controlled CPU/RAM/GPU isolation → re-run).

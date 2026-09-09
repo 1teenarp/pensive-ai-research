@@ -11,12 +11,13 @@ settings that are known to work (or worked in the past)** on this box (2× RTX P
 
 ---
 
-## Quick reference — the two models we've actually served
+## Quick reference — the models we've actually served
 
 | Model | Format | On-disk | VRAM needs | Status | Settings |
 |---|---|---|---|---|---|
-| **nvidia/Qwen3.8-Flash-Next-NVFP4** | NVFP4 MoE (125B total / 6B act, +51B ngram) | 124 GB | ~54 GB/GPU + KV (PLE to RAM) | ✅ **CURRENT — serving + fast** | See "Recipe A" below |
+| **nvidia/Qwen3.8-Flash-Next-NVFP4** | NVFP4 MoE (125B total / 6B act, +51B ngram) | 124 GB | ~54 GB/GPU + KV (PLE to RAM) | ✅ Proven, not running now (superseded by FP8) | See "Recipe A" below |
 | **unsloth/Qwen3.8-27B-NVFP4** | NVFP4 dense (27B) | 22 GB | ~1 GPU comfortable | ✅ **Worked in past** (llama.cpp/vLLM) | See "Recipe B" below |
+| **Qwen/Qwen3.8-Flash-Next-FP8** | FP8 MoE (same arch as Recipe A, heavier weights) | 173 GB | ~60.5 GB/GPU weight (8GB/wkr offloaded) + KV | ✅ **CURRENT — serving, 256K ctx, ~20-24 tok/s** | See "Recipe C" below |
 
 ---
 
@@ -80,6 +81,53 @@ vllm serve /trunk/ai/huggingface/models/unsloth/Qwen3.8-27B-NVFP4 \
 
 ---
 
+## Recipe C — Qwen3.8-Flash-Next-FP8 (current, native 256K context, spec decode)
+
+**Model:** `Qwen/Qwen3.8-Flash-Next-FP8` — same `Qwen4ExpForConditionalGeneration` architecture as
+Recipe A (48 layers, 512 experts/10-per-tok, native 262,144 ctx, 51B-param n-gram/PLE table), just
+native FP8 (1 byte/param) instead of NVFP4 (0.5 byte/param) — chosen over NVFP4 for precision, at the
+cost of ~2x the GPU-resident weight footprint. Launcher: `recipe/serve-qwen38-flash-next-fp8.sh`
+(defaults already match the config below — see the script header for the full "what was tried" log).
+
+**Working settings:**
+- Same patched image as Recipe A (`vllm/vllm-openai:qwen38-flash-next-patched`) — this checkpoint's
+  PLE table has the identical layout the image's FP8-PLE-selector patch targets, confirmed via
+  config.json/index.json inspection, no new patching needed.
+- TP2, `--cpu-offload-gb 8` per worker (shaves GPU-resident weight to make room for full-context KV —
+  without it, `--gpu-memory-utilization 0.95` alone isn't enough headroom at 262144 ctx).
+- `--max-model-len 262144 --max-num-seqs 1` (native context; tight VRAM margin needs low concurrency).
+- `--gpu-memory-utilization 0.95` (higher than Recipe A's 0.90 — margin is much tighter here).
+- **CUDA graphs ON** (do NOT pass `--enforce-eager`) — smaller win than Recipe A's ~4x (only ~1.4x,
+  11.5 vs ~8 tok/s), itself evidence the bottleneck is cross-GPU TP communication over this box's
+  no-NVLink/no-P2P interconnect, not kernel-launch overhead.
+- **MTP speculative decoding**: `--speculative-config '{"method":"mtp","num_speculative_tokens":4}'`.
+  Confirmed working despite the comm-bound TP setup (~65-70% avg per-token acceptance). **5 crashes**
+  (`QSA ring capacity 12 must divide the attention block size 1616` — the attention block size is
+  computed dynamically from mamba/attention page-size alignment, not a simple formula; 4 is the
+  tested ceiling, don't assume higher values work without retesting).
+- Env: `NCCL_P2P_DISABLE=1`, `VLLM_PLE_CPU_OFFLOAD=1`, `VLLM_QWEN38_PLE_FP8_SCALE=1`,
+  `VLLM_WORKER_MULTIPROC_METHOD=spawn`, `NCCL_CUMEM_HOST_ENABLE=0` (auto-detected — GPU0's local NUMA
+  node is memory-less during the current DIMM isolation testing).
+- **Do NOT** set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` if also using
+  `--kv-offloading-size` — the two are incompatible (vLLM raises a pydantic ValidationError). Not used
+  in the final config (see "tried and rejected" below).
+- **Pipeline parallelism (TP=1 PP=2) is a dead end for this model** — `VLLM_PLE_CPU_OFFLOAD` has an
+  explicit vLLM guard against PP, since the mandatory PLE offload doesn't support it.
+- **KV-cache CPU offload (`--kv-offloading-size`) doesn't extend a single sequence's live context** —
+  it's for cross-request prefix-cache reuse, not paging one request's active KV beyond GPU capacity.
+  Didn't help reach 256K context; weight offload (`--cpu-offload-gb`) is the right lever for that.
+
+**Measured performance (native 262144 context, real weights, steady-state via vLLM `/metrics`):**
+- **~20-24 tok/s** with CUDA graphs + spec decode (vs. ~8 tok/s eager baseline, ~11.5 tok/s CUDA
+  graphs alone) — a ~2.5-3x overall improvement. **Judge throughput only after a couple of warm-up
+  requests** — the first 1-2 requests after a fresh restart are much slower (one-time lazy compilation
+  on the spec-decode path), not representative of steady state.
+- GPU-resident weight: 54.48 GiB/rank (with the 8GB/worker offload applied); KV cache: ~8.9-10.5 GiB
+  available per GPU at `gpu-memory-utilization 0.95`, comfortably covering the ~3.28 GiB/GPU that full
+  262144-token context needs.
+
+---
+
 ## Catalog — all models present under /trunk/ai/huggingface/models/
 
 Sizes are on-disk. "Fit" is based on ~128–135 GB usable VRAM (single process) unless noted.
@@ -97,8 +145,8 @@ Sizes are on-disk. "Fit" is based on ~128–135 GB usable VRAM (single process) 
 | **nvidia/Qwen3.5-397B-A17B-NVFP4** | 223 GB | MoE NVFP4 | large | ⚠️ offload/RAM (ran at ~1 tok/s) |
 | **Qwen/Qwen3-Coder-Next** | 149 GB | MoE coder | large | ⚠️ 2 GPU / offload |
 | **Qwen/Qwen3-Coder-Next-FP8** | 75 GB | MoE coder FP8 | small | ✅ 2 GPU |
-| **nvidia/Qwen3.8-Flash-Next-NVFP4** | 124 GB | MoE 125B/6B, 262k ctx | large | ✅ **CURRENT (Recipe A)** |
-| **Qwen/Qwen3.8-Flash-Next-FP8** | 173 GB | MoE FP8, 262k ctx | large | ⚠️ 2 GPU (tight) |
+| **nvidia/Qwen3.8-Flash-Next-NVFP4** | 124 GB | MoE 125B/6B, 262k ctx | large | ✅ Proven (Recipe A) — not running now, superseded by FP8 (Recipe C) for precision |
+| **Qwen/Qwen3.8-Flash-Next-FP8** | 173 GB | MoE FP8, 262k ctx | large | ✅ **CURRENT (Recipe C)** — 2 GPU + 8GB/wkr weight offload |
 | **Qwen/Qwen3.8-Flash-Next** | 336 GB | MoE BF16 | large | ❌ offload only |
 | **DeepSeek-V4-Flash / -FP variants** | 146–153 GB | MoE | large | ⚠️ 2 GPU (tight) |
 | **nvidia/DeepSeek-V4-Flash-NVFP4** | 150 GB | MoE NVFP4 | large | ⚠️ just fits 2 GPU |
