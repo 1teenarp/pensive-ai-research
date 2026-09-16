@@ -36,6 +36,12 @@
 #     alignment), so which spec_tokens values satisfy the divisibility isn't a simple formula; 4 is
 #     the confirmed-working ceiling found by testing, don't assume 5+ works without retesting.
 #
+# WHY it's "only" ~10-24 tok/s — full bottleneck forensics (2026-09-09) in recipe/MODEL-CATALOG.md
+# "Recipe C → Generation-speed bottleneck investigation": GPUs idle-spinning at ~100 W/99 %-util on
+# ~104 blocking TP2 all-reduces per MTP round over the host-bounce cross-NUMA path (primary), plus the
+# intrinsically slow FP8 batch-1 MoE kernel path (secondary). Top levers: torch-profiler split,
+# iommu=pt → re-enable PCIe P2P, restore node-3 DIMMs, or concurrency at shorter ctx.
+#
 # Usage:
 #   bash serve-qwen38-flash-next-fp8.sh              # stop any existing, then start
 #   bash serve-qwen38-flash-next-fp8.sh --restart    # same as above (stop+start)
@@ -63,11 +69,16 @@
 #     speculative decoding (confirmed present: vllm/v1/spec_decode/qwen3_8_flash_next.py, built on the
 #     standard EagleProposer; draft model config has mtp_num_hidden_layers=1)
 #   SPEC_TOKENS=2   --speculative-config num_speculative_tokens, only used when SPEC_METHOD is set
+#   BIND_HOST=""    where to PUBLISH the port on the host: "" = all interfaces (legacy default);
+#     100.70.5.43 = tailscale0 only; 127.0.0.1 = localhost only. The engine still binds 0.0.0.0
+#     INSIDE the container (docker-proxy NAT requires it) — never move --host; restrict at the -p.
+#   API_KEY=""      "" = unauthenticated (legacy). If set, passed to vLLM as --api-key; clients need
+#     "Authorization: Bearer $API_KEY". 2026-09-16: clients are remote on the tailnet — set it.
 #
 set -u
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODEL="${MODEL:-/trunk/ai/huggingface/models/Qwen/Qwen3.8-Flash-Next-FP8}"
+MODEL="${MODEL:-/buffer/cache/models/Qwen3.8-Flash-Next-FP8}"
 IMAGE="${IMAGE:-vllm/vllm-openai:qwen38-flash-next-patched}"
 NAME="${NAME:-qwen38-flash-fp8-serve}"
 PORT="${PORT:-8092}"
@@ -87,6 +98,8 @@ PP="${PP:-1}"                                   # PP>1 is a dead end here — se
 SPEC_METHOD="${SPEC_METHOD:-mtp}"               # confirmed working; set empty to disable
 SPEC_TOKENS="${SPEC_TOKENS:-4}"                 # confirmed ceiling; 5 crashes (QSA ring-capacity divisibility)
 SERVE_LOG="${SERVE_LOG:-/var/tmp/serve-qwen38-fp8.log}"
+BIND_HOST="${BIND_HOST:-}"                      # "" = publish on all interfaces; IP = tailscale0/LAN bind only
+API_KEY="${API_KEY:-}"                          # "" = no auth; else vLLM --api-key (Bearer token)
 QWEN_NVFP4_NAME="qwen38-flash-serve"
 GLM_NAME="glm53-flash-serve"
 
@@ -234,12 +247,16 @@ start_serve(){
   if [ -n "$SPEC_METHOD" ]; then
     spec_args+=(--speculative-config "{\"method\":\"${SPEC_METHOD}\",\"num_speculative_tokens\":${SPEC_TOKENS}}")
   fi
+  local api_args=()
+  [ -n "$API_KEY" ] && api_args+=(--api-key "$API_KEY")
+  local publish="$PORT:8000"
+  [ -n "$BIND_HOST" ] && publish="$BIND_HOST:$PORT:8000"
   docker rm -f "$NAME" >/dev/null 2>&1
-  log "launching $NAME (model=$MODEL, served=$SERVED_MODEL, TP=$TP PP=$PP, ctx=$MAX_MODEL_LEN, seqs=$MAX_NUM_SEQS, eager=$ENFORCE_EAGER, load_format=$LOAD_FORMAT, cpu_offload=${CPU_OFFLOAD_GB}GB, kv_offload=${KV_OFFLOADING_SIZE}GiB/${KV_OFFLOADING_BACKEND}, spec=${SPEC_METHOD:-none}/${SPEC_TOKENS}, NCCL_CUMEM_HOST_ENABLE=${RESOLVED_CUMEM_HOST_ENABLE:-<default>})"
+  log "launching $NAME (model=$MODEL, served=$SERVED_MODEL, TP=$TP PP=$PP, ctx=$MAX_MODEL_LEN, seqs=$MAX_NUM_SEQS, eager=$ENFORCE_EAGER, load_format=$LOAD_FORMAT, cpu_offload=${CPU_OFFLOAD_GB}GB, kv_offload=${KV_OFFLOADING_SIZE}GiB/${KV_OFFLOADING_BACKEND}, spec=${SPEC_METHOD:-none}/${SPEC_TOKENS}, NCCL_CUMEM_HOST_ENABLE=${RESOLVED_CUMEM_HOST_ENABLE:-<default>}, publish=${BIND_HOST:-<all-ifaces>}:${PORT}, auth=$([ -n "$API_KEY" ] && echo on || echo off))"
   nohup docker run -d --name "$NAME" \
     --gpus all --shm-size 16g --ipc=host \
     --cap-add SYS_PTRACE --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
-    -v "$MODEL":/model:ro -p "$PORT":8000 \
+    -v "$MODEL":/model:ro -p "$publish" \
     -e NCCL_P2P_DISABLE=1 -e VLLM_PLE_CPU_OFFLOAD=1 -e VLLM_QWEN38_PLE_FP8_SCALE=1 \
     -e VLLM_WORKER_MULTIPROC_METHOD=spawn \
     "${alloc_conf_env[@]}" \
@@ -251,6 +268,7 @@ start_serve(){
     --gpu-memory-utilization "$GPU_MEM_UTIL" --disable-custom-all-reduce \
     --max-parallel-loading-workers 1 \
     --host 0.0.0.0 \
+    "${api_args[@]}" \
     --enable-auto-tool-choice --tool-call-parser qwen3_xml \
     --reasoning-parser qwen3 --trust-remote-code \
     "${offload_args[@]}" "${spec_args[@]}" "${extra[@]}" \

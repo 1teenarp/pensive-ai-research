@@ -1,22 +1,49 @@
 # System Specifications — build "pensive"
 
-Date: 2026-09-08 (last verified against live hardware; RAM section is a MOVING TARGET right now — see
-status note below, and re-verify with `numactl -H` / `free -h` before relying on any figure in §3)
+Date: 2026-09-10; RAM/NUMA and driver state re-verified against live hardware **2026-09-15** (RAM
+unchanged: 751 GiB across 4 nodes, ~543 GiB available). Re-verify with `numactl -H` / `free -h` before
+relying on any figure in §3 — the RAM config has changed twice already this week and may change again
+once the 2 bad DIMMs are RMA'd and replacements reinstalled.
 Scope: machine hardware/inference-capability assessment that informs what models can run locally on
 this build. The system's actual, live spec snapshot lives in `power-debug-collect.sh` output; this file
 is the curated reference for planning.
 
-> Hardware status (2026-09-08): the marginal DIMM on channel G / slot MM4 (see `power-trip-diagnosis.md`,
-> `power-trip-instances.md`) has been **physically removed for isolation/RMA testing**, along with the
-> rest of its NUMA-node half (4 of 8 DIMMs pulled — nodes 2 and 3 are currently memory-less). memtest86
-> on the remaining ~512 GB came back clean. This is a **TEMPORARY configuration**: plan is to pin down
-> the specific bad stick, RMA it, then reinstall the other 7 known-good sticks (an interim ~7-DIMM state
-> until the replacement arrives), then return to the full 8-DIMM / 1 TiB config. §3 below reflects the
-> current testing state — expect it to change at least twice more. One concrete side effect already hit
-> this session: with GPU0's local NUMA node (3) memory-less, NCCL's `ncclCuMemHostEnable()` host-memory
-> probe segfaults on launch; `recipe/serve-qwen38-flash-next-nvfp4.sh` now auto-detects this (see §1
-> topology note) and sets `NCCL_CUMEM_HOST_ENABLE=0` accordingly — no manual flag-flipping needed as the
-> DIMM count changes. Keep `powertrip-capture` running during re-test.
+> **Hardware status (2026-09-10): root cause found, 2 bad DIMMs physically removed, 6 of 8 reinstalled.**
+> The isolation testing (see `power-trip-diagnosis.md`, `power-trip-instances.md`) identified **two**
+> faulty sticks, not one: the original channel-G/MM4 suspect (was throwing memtest86+ errors) **and** a
+> second stick found to have physically damaged PCB pads (chipped/missing small components) — silently
+> bad, wouldn't have shown up as a clean memtest failure. Both are now pulled for RMA; the other 6
+> known-good sticks are back in. **All 4 NUMA nodes have memory again** (uneven population — see §3),
+> so the memory-less-GPU-local-node NCCL workaround (§2) no longer triggers on either GPU, though the
+> auto-detecting scripts still carry it harmlessly for whenever DIMMs move again. Total live RAM is now
+> ~751 GiB (6×128 GB), up from the ~499 GiB isolation-testing low point, still short of the 1 TiB
+> nameplate until the 2 RMA replacements arrive and go in.
+>
+> **RESOLVED 2026-09-15 — NVIDIA driver/library version mismatch (found 2026-09-10).** Both sides now
+> read **580.178.04** (`/proc/driver/nvidia/version` and `modinfo nvidia`), so GPU containers launch
+> normally again. Kept here because the failure mode is worth recognising instantly:
+> an apt upgrade (`nvidia-driver-580-open` 580.173.02 → 580.178.04, `Start-Date: 2026-09-10 09:59:20`,
+> 19 min after that morning's post-DIMM-work reboot at 09:40:58) updated the userspace libraries while
+> the **kernel module in memory stayed at the old 580.173.02** — nothing reloaded it. That broke
+> `nvidia-smi` host-wide (`Failed to initialize NVML: Driver/library version mismatch`) and every GPU
+> container (`nvidia-container-cli: initialization error: nvml error: driver/library version mismatch`,
+> container stuck in `Created`, exit code 128) — **not specific to any one recipe**, though it reads
+> like a model problem. Fixes, needing root: reboot (cleanest — loads the matching module),
+> `rmmod`+`modprobe` with no GPU processes active, or pin the package back to the loaded version.
+> **Always check this pair first when a container dies at init:**
+> ```bash
+> cat /proc/driver/nvidia/version        # loaded kernel module
+> modinfo nvidia | grep '^version:'      # installed package  -> MUST MATCH
+> ```
+>
+> **Access model (2026-09-16): serve ports are used by remote clients on the Tailscale tailnet, not
+> only localhost.** `pensive` = `100.70.5.43` (`pensive.tail48d18a.ts.net`); own clients hit the 809x
+> engine ports over the tailnet. Until 2026-09-16 every engine published its port on **all host
+> interfaces with no auth** (LAN included) — this is now an explicit choice, not an accident: the four
+> `recipe/serve-*.sh` launchers gained `BIND_HOST` (host-side publish restriction — set
+> `BIND_HOST=100.70.5.43` for tailscale0-only) and `API_KEY` (vLLM `--api-key` / Bearer). Both default
+> to legacy behavior, so nothing changed for currently-running servers. Verify live with:
+> `docker inspect <name> --format '{{json .NetworkSettings.Ports}}'`.
 
 ---
 
@@ -27,7 +54,7 @@ is the curated reference for planning.
 | Model | NVIDIA RTX PRO 5000 72GB Blackwell | NVIDIA RTX PRO 5000 72GB Blackwell |
 | VRAM total | 73,415 MiB (72 GB) | 73,415 MiB (72 GB) |
 | Compute capability | 12.0 (Blackwell) | 12.0 (Blackwell) |
-| Driver | 580.173.02 | same |
+| Driver | 580.178.04, module and package matched (re-verified 2026-09-15; the 2026-09-10 mismatch is resolved — see banner) | same |
 | CUDA supported | 13.0 | 13.0 |
 | Peak power cap | 300 W (tuned down to ~250 W for stability) | 300 W (tuned down to ~250 W for stability) |
 
@@ -59,32 +86,45 @@ vLLM CPU offload (`--cpu-offload-gb`) can extend VRAM for very large models as a
 > **does not fix P2P** and would interleave the failing channel G into all traffic. See
 > `why-databric-syncflood-not-interceptable.md` and the topology discussion in the research docs.
 >
-> **Live caveat (2026-09-08, while DIMMs are pulled):** GPU0's local node (3) is currently memory-less
-> (see hardware-status banner above). NCCL's host-cuMem registration probe (`ncclCuMemHostEnable` →
-> `cuMemCreate`) segfaults at `ncclCommInitRank` when a GPU's local NUMA node has 0 MB — it doesn't fall
-> back gracefully. `recipe/serve-qwen38-flash-next-nvfp4.sh` auto-detects this per-launch (checks each
-> GPU's `/sys/bus/pci/devices/<addr>/numa_node` against that node's live meminfo) and sets
-> `NCCL_CUMEM_HOST_ENABLE=0` only when needed, so it self-adjusts as DIMMs go back in — no doc/flag
-> update required when the RAM config changes.
+> **Live status (2026-09-10):** both GPU-local NUMA nodes have memory again (GPU0→node 3: 254 GiB,
+> GPU1→node 0: 129 GiB — originally confirmed via `/sys/bus/pci/devices/<addr>/numa_node` while
+> `nvidia-smi` was broken by the driver mismatch; still current as of 2026-09-15). The memory-less-node NCCL
+> segfault (`ncclCuMemHostEnable`→`cuMemCreate` crashing at `ncclCommInitRank` when a GPU's local node
+> has 0 MB) hit during the 4-DIMM isolation-testing low point and doesn't apply right now. The launcher
+> scripts (`recipe/serve-qwen38-flash-next-nvfp4.sh`, `-fp8.sh`, `serve-glm-53-flash.sh`) all auto-detect
+> this per-launch and only force `NCCL_CUMEM_HOST_ENABLE=0` when actually needed, so no flag/doc update
+> is required as DIMMs move again — this note documents the mechanism, not a currently-active workaround.
+>
+> **Reusable check-topology command** (works without `nvidia-smi`, useful right now since it's broken):
+> ```bash
+> numactl -H   # per-node size/NUMA population
+> for f in /sys/bus/pci/devices/*/; do
+>   grep -q 0x10de "${f}vendor" 2>/dev/null && echo "$f -> numa_node=$(cat "${f}numa_node")"
+> done
+> ```
+> (`0x10de` = NVIDIA's PCI vendor ID; each GPU shows up as 2 devices — the GPU function and its audio
+> function — both report the same NUMA node.)
 
 ## 3. Memory (host RAM)
 
-**Currently in flux — re-verify live before relying on any number here** (`numactl -H` for per-node
-size/NUMA-node population, `free -h` for total/available):
+**Re-verify live before relying on any number here** (`numactl -H` for per-node size/NUMA-node
+population, `free -h` for total/available) — the config has changed twice this week and will change
+again once the 2 RMA replacement DIMMs arrive and go in.
 
-| Property | Nameplate (original, 8 DIMMs) | **Live now (2026-09-08, isolation testing)** |
-|---|---|---|
-| Total | 1.0 TiB (8 × 128 GB Micron DDR4-3200 8-rank RDIMM) | **~499 GiB (4 DIMMs populated)** |
-| NUMA nodes with memory | 4 (0–3) | **2 (nodes 0, 1) — nodes 2 and 3 are memory-less** |
-| Available | ~925 GiB | **~490 GiB (see live `free -h`)** |
+| Property | Nameplate (original, 8 DIMMs) | 2026-09-08 isolation-testing low point | **Live now (2026-09-10, 6-DIMM interim)** |
+|---|---|---|---|
+| Total | 1.0 TiB (8 × 128 GB Micron DDR4-3200 8-rank RDIMM) | ~499 GiB (4 DIMMs) | **~751 GiB (6 DIMMs)** |
+| NUMA nodes with memory | 4 (0–3) | 2 (nodes 0, 1) | **4 (0–3) — all populated, unevenly** |
+| Per-node size | ~256 GiB each | nodes 0/1 ~250 GiB, nodes 2/3 = 0 | **node0 129 GiB (1 DIMM), node1 258 GiB (2 DIMMs), node2 129 GiB (1 DIMM), node3 254 GiB (2 DIMMs)** |
+| Available | ~925 GiB | ~490 GiB | **~742 GiB (see live `free -h`)** |
 
 Plenty of RAM either way — not the capacity constraint for the model sizes this box targets; can
-RAM-offload or use huge KV caches. **But** the memory subsystem is the source of the recurring fault:
-the marginal DIMM on **channel G (slot MM4)** threw corrected-ECC that escalated to an uncorrectable →
-sync-flood reset under heavy load. That DIMM (and its NUMA-node half) is **currently pulled** for
-isolation/RMA testing — memtest86 on the remaining ~512 GB came back clean. Plan: identify the specific
-bad stick, RMA it, reinstall the other 7 known-good sticks (interim ~896 GiB / uneven NUMA population),
-then return to the full 1 TiB / 8-DIMM config once the replacement arrives. See the hardware-status
+RAM-offload or use huge KV caches. **Root cause of the recurring fault is now identified as two bad
+DIMMs**, not one: the original channel-G/MM4 suspect (memtest86+ errors) and a second stick found to
+have physically damaged PCB pads (chipped/missing small components) — a silent failure mode memtest
+wouldn't have caught on its own. Both are pulled for RMA; the other 6 known-good sticks are reinstalled
+(the uneven per-node sizes above reflect which of the original 8 slots lost a stick). Plan: RMA the 2
+bad sticks, reinstall the replacements, return to the full 1 TiB / 8-DIMM config. See the hardware-status
 banner at the top of this file and `power-trip-diagnosis.md` for the up-to-date plan.
 
 ## 4. Storage
