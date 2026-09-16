@@ -22,6 +22,11 @@
 #     local NUMA node is memory-less (segfaults in ncclCuMemHostEnable/cuMemCreate otherwise — seen
 #     after removing the faulty-DIMM socket half, which left GPU0's local node (3) with 0 MB). Set to
 #     1 to force NCCL's default (host cuMem registration on) once all NUMA nodes have memory again.
+#   BIND_HOST=""    where to PUBLISH the port on the host: "" = all interfaces (legacy default);
+#     100.70.5.43 = tailscale0 only; 127.0.0.1 = localhost only. The engine still binds 0.0.0.0
+#     INSIDE the container (docker-proxy NAT requires it) — never move --host; restrict at the -p.
+#   API_KEY=""      "" = unauthenticated (legacy). If set, passed to vLLM as --api-key; clients need
+#     "Authorization: Bearer $API_KEY". 2026-09-16: clients are remote on the tailnet — set it.
 #
 set -u
 
@@ -38,6 +43,8 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
 NCCL_CUMEM_HOST_ENABLE="${NCCL_CUMEM_HOST_ENABLE:-auto}"
 SERVE_LOG="${SERVE_LOG:-/var/tmp/serve.log}"   # persistent, not /tmp
+BIND_HOST="${BIND_HOST:-}"                     # "" = publish on all interfaces; IP = tailscale0/LAN bind only
+API_KEY="${API_KEY:-}"                         # "" = no auth; else vLLM --api-key (Bearer token)
 
 # Pull-in the patched ple_layer.py from the patched-build dir if the image is missing.
 PATCHED_PL="${PATCHED_PL:-/tmp/patched-build/ple_layer.py}"
@@ -186,16 +193,20 @@ arm_edac_watch(){
 start_serve(){
   local extra=()
   [ "$ENFORCE_EAGER" = "1" ] && extra+=(--enforce-eager)
+  local api_args=()
+  [ -n "$API_KEY" ] && api_args+=(--api-key "$API_KEY")
+  local publish="$PORT:8000"
+  [ -n "$BIND_HOST" ] && publish="$BIND_HOST:$PORT:8000"
   local cumem_env=()
   if [ -n "${RESOLVED_CUMEM_HOST_ENABLE:-}" ]; then
     cumem_env+=(-e "NCCL_CUMEM_HOST_ENABLE=${RESOLVED_CUMEM_HOST_ENABLE}")
   fi
   docker rm -f "$NAME" >/dev/null 2>&1
-  log "launching $NAME (model=$MODEL, served=$SERVED_MODEL, ctx=$MAX_MODEL_LEN, seqs=$MAX_NUM_SEQS, eager=$ENFORCE_EAGER, NCCL_CUMEM_HOST_ENABLE=${RESOLVED_CUMEM_HOST_ENABLE:-<default>})"
+  log "launching $NAME (model=$MODEL, served=$SERVED_MODEL, ctx=$MAX_MODEL_LEN, seqs=$MAX_NUM_SEQS, eager=$ENFORCE_EAGER, NCCL_CUMEM_HOST_ENABLE=${RESOLVED_CUMEM_HOST_ENABLE:-<default>}, publish=${BIND_HOST:-<all-ifaces>}:${PORT}, auth=$([ -n "$API_KEY" ] && echo on || echo off))"
   nohup docker run -d --name "$NAME" \
     --gpus all --shm-size 16g --ipc=host \
     --cap-add SYS_PTRACE --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
-    -v "$MODEL":/model:ro -p "$PORT":8000 \
+    -v "$MODEL":/model:ro -p "$publish" \
     -e NCCL_P2P_DISABLE=1 -e VLLM_PLE_CPU_OFFLOAD=1 -e VLLM_QWEN38_PLE_FP8_SCALE=1 \
     -e VLLM_WORKER_MULTIPROC_METHOD=spawn \
     -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
@@ -207,6 +218,7 @@ start_serve(){
     --gpu-memory-utilization 0.90 --disable-custom-all-reduce \
     --max-parallel-loading-workers 1 \
     --host 0.0.0.0 \
+    "${api_args[@]}" \
     --enable-auto-tool-choice --tool-call-parser qwen3_xml \
     --reasoning-parser qwen3 --trust-remote-code "${extra[@]}" \
     > "$SERVE_LOG" 2>&1 &

@@ -33,10 +33,35 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-1}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.80}"
 SERVE_LOG="${SERVE_LOG:-/var/tmp/serve-glm53.log}"
+BIND_HOST="${BIND_HOST:-}"      # "" = publish port on all host interfaces (legacy); 100.70.5.43 = tailscale0 only;
+                                # 127.0.0.1 = localhost only. Engine keeps binding 0.0.0.0 INSIDE the container
+                                # (docker-proxy NAT requires it) — restriction happens at the -p publish.
+API_KEY="${API_KEY:-}"          # "" = no auth (legacy); else vLLM --api-key, clients send Bearer token.
+                                # 2026-09-16: clients are remote on the tailnet — set this when exposing.
 QWEN_NAME="qwen38-flash-serve"
 
 log(){ echo "[glm53] $*"; }
 die(){ log "ERROR: $*"; exit 1; }
+
+# ---- remote-access readiness (2026-09-16: clients are on the tailnet, not just localhost) ----
+# Derived from the LIVE container so a fresh --wait/--status shell without BIND_HOST/API_KEY
+# still probes the right address with the right token.
+probe_url(){
+  local ip host="localhost"
+  ip="$(docker inspect "$NAME" --format '{{range $p, $conf := .NetworkSettings.Ports}}{{if $conf}}{{(index $conf 0).HostIP}}{{end}}{{end}}' 2>/dev/null | head -1)"
+  if [ -n "$ip" ] && [ "$ip" != "0.0.0.0" ] && [ "$ip" != "::" ]; then host="$ip"; fi
+  echo "http://${host}:${PORT}/v1/models"
+}
+probe_key(){
+  if [ -n "$API_KEY" ]; then echo "$API_KEY"; return; fi
+  docker inspect "$NAME" --format '{{join .Args " "}}' 2>/dev/null \
+    | awk '{for(i=1;i<NF;i++) if($i=="--api-key"){print $(i+1); exit}}'
+}
+http_probe(){
+  local url key; url="$(probe_url)"; key="$(probe_key)"
+  if [ -n "$key" ]; then curl -sf -o /dev/null -H "Authorization: Bearer $key" "$url" 2>/dev/null
+  else curl -sf -o /dev/null "$url" 2>/dev/null; fi
+}
 
 check_image(){
   docker image inspect "$IMAGE" >/dev/null 2>&1 \
@@ -168,16 +193,20 @@ drop_caches(){
 launch(){   # $1 = "dummy" | "real"
   local mode="$1" extra=()
   [ "$mode" = "dummy" ] && extra+=(--load-format dummy)
+  local api_args=()
+  [ -n "$API_KEY" ] && api_args+=(--api-key "$API_KEY")
+  local publish="$PORT:8000"
+  [ -n "$BIND_HOST" ] && publish="$BIND_HOST:$PORT:8000"
   local cumem_env=()
   if [ -n "${RESOLVED_CUMEM_HOST_ENABLE:-}" ]; then
     cumem_env+=(-e "NCCL_CUMEM_HOST_ENABLE=${RESOLVED_CUMEM_HOST_ENABLE}")
   fi
   docker rm -f "$NAME" >/dev/null 2>&1
-  log "launching $NAME mode=$mode TP=$TP offload=${CPU_OFFLOAD_GB}GB/wkr ctx=$MAX_MODEL_LEN eager=1 NCCL_CUMEM_HOST_ENABLE=${RESOLVED_CUMEM_HOST_ENABLE:-<default>}"
+  log "launching $NAME mode=$mode TP=$TP offload=${CPU_OFFLOAD_GB}GB/wkr ctx=$MAX_MODEL_LEN eager=1 NCCL_CUMEM_HOST_ENABLE=${RESOLVED_CUMEM_HOST_ENABLE:-<default>} publish=${BIND_HOST:-<all-ifaces>}:${PORT} auth=$([ -n "$API_KEY" ] && echo on || echo off)"
   nohup docker run -d --name "$NAME" \
     --gpus all --shm-size 16g --ipc=host \
     --cap-add SYS_PTRACE --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
-    -v "$MODEL":/model:ro -p "$PORT":8000 \
+    -v "$MODEL":/model:ro -p "$publish" \
     -e NCCL_P2P_DISABLE=1 \
     -e VLLM_WORKER_MULTIPROC_METHOD=spawn \
     -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
@@ -191,6 +220,7 @@ launch(){   # $1 = "dummy" | "real"
     --gpu-memory-utilization "$GPU_MEM_UTIL" --disable-custom-all-reduce \
     --max-parallel-loading-workers 1 --enforce-eager \
     --host 0.0.0.0 \
+    "${api_args[@]}" \
     --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm45 \
     "${extra[@]}" \
     > "$SERVE_LOG" 2>&1 &
@@ -217,8 +247,8 @@ wait_ready(){   # poll until the server binds, the container dies, or we time ou
       log "next: snapshot it before cleanup -> bash $REPO_DIR/recipe/run-log.sh --container $NAME --stage <stage>"
       return 1
     fi
-    if curl -sf -o /dev/null "http://localhost:${PORT}/v1/models" 2>/dev/null; then
-      log "READY after ${elapsed}s — http://localhost:${PORT}/v1/models"; return 0
+    if http_probe; then
+      log "READY after ${elapsed}s — $(probe_url)"; return 0
     fi
     if [ "$elapsed" -ge "$timeout" ]; then log "timed out after ${elapsed}s (still running; keep watching docker logs -f $NAME)"; return 2; fi
     sleep 15
@@ -229,7 +259,7 @@ status(){
   docker ps -a --filter name="$NAME" --format 'serve: {{.Names}} {{.Status}}'
   nvidia-smi --query-gpu=index,memory.used --format=csv,noheader | sed 's/^/  gpu /'
   free -g | awk 'NR==2{print "  ram used/avail GB: "$3"/"$7}'
-  curl -sf -o /dev/null "http://localhost:${PORT}/v1/models" 2>/dev/null \
+  http_probe \
     && echo "  http: READY on :$PORT" || echo "  http: not serving on :$PORT"
   echo "  --- docker logs (last 8) ---"
   docker logs "$NAME" 2>&1 | tail -8 | sed 's/^/  /'
@@ -248,6 +278,7 @@ usage: $0 --check | --dummy | --serve | --wait | --logs | --stop | --status
   --wait    poll until the server binds :$PORT, the container dies, or WAIT_TIMEOUT (default 5400s)
   --logs    follow the real vLLM output (SERVE_LOG holds only the container id)
 env: IMAGE TP CPU_OFFLOAD_GB MAX_MODEL_LEN MAX_NUM_SEQS GPU_MEM_UTIL GPU_POWER_CAP WAIT_TIMEOUT
+       BIND_HOST API_KEY
 see recipe/GLM-53-FLASH-RECIPE.md for the staged plan and risk gates
 EOF
   ;;

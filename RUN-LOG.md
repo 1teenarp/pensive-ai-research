@@ -53,6 +53,7 @@ a full entry whenever something failed, surprised you, or moved a number.
 
 | # | Date (local) | Model · stage | Changed | Outcome | Detail |
 |---|---|---|---|---|---|
+| **R-015** | 2026-09-16 00:27 | GLM-5.3-Flash-NVFP4 · `--dummy` | `IMAGE` → `vllm/vllm-openai:nightly` (0.29.1rc1, flashinfer 0.6.18) | **Failed, identical signature** — `pe_dim must be 64 for fp8_ds_mla`. Public nightly does not fix it; its compiled kernel still carries the assert and its sm_120 selector is unchanged. | [below](#r-015) |
 | **R-014** | 2026-09-15 22:27 | GLM-5.3-Flash-NVFP4 · `--dummy` | first GPU stage for this model | **Failed at KV-cache init** — `pe_dim must be 64 for fp8_ds_mla`. NVFP4 loader + sparse-MLA selection proved good. **Corrected same evening: no flag fixes this — sm_120 has no NoPE sparse-MLA path in this build.** | [below](#r-014) |
 | R-013 | 2026-09-14 13:49 | GLM-5.3-Flash-NVFP4 · acquire | — | Download complete, 44/44 files, 204.5 GB / 190.5 GiB, 49m22s | `GLM-53-FLASH-NVFP4-RECIPE.md` §0 |
 | R-012 | 2026-09-10 12:54 | Qwen3.8-Flash-Next-FP8 · serve | driver module reloaded | Healthy serve restored after the host-wide driver mismatch was fixed | `MODEL-CATALOG.md` Recipe C |
@@ -79,6 +80,38 @@ a full entry whenever something failed, surprised you, or moved a number.
 ---
 
 ## Entries
+
+### R-015
+**2026-09-16 00:27 local — nvidia/GLM-5.3-Flash-NVFP4 · stage `--dummy`**
+*(Written 00:43 local, opencode session; run launched by the same session after user authorized pulling the public nightly.)*
+
+| | |
+|---|---|
+| **Outcome** | **Failed at KV-cache init — identical signature to R-014.** Clean exit, no host reset, no OOM. |
+| **Duration** | 4m16s (exit 1, OOMKilled=false) |
+| **Image** | `vllm/vllm-openai:nightly` (vllm 0.29.1rc1.dev187, flashinfer 0.6.18.post1) — pulled fresh for this test |
+| **Host** | driver 580.178.04 matched; RAM 751 GB total, 542 GB avail; NUMA 125/251/125/247 GB; booted 2026-09-14 08:12:28 |
+| **GPUs** | 0: 26 MiB / 300 W; 1: 2 MiB / 300 W — **power cap did not apply** (no interactive sudo) |
+| **Capture** | armed, klog actively writing throughout |
+| **Changed vs. last attempt** | ONE variable: `IMAGE` — `glm53-flash` dev build → public `nightly`. Same flags, same config. |
+
+**Config** — identical to R-014 (launcher defaults: TP2, offload 32 GB/wkr, ctx 8192, seqs 1, mem_util 0.90, `--kv-cache-dtype fp8`, dummy weights).
+
+**Signature**
+```
+(Worker_TP0/TP1) RuntimeError: concat_and_cache_mla,
+  /workspace/csrc/libtorch_stable/cache_kernels.cu:937,
+  pe_dim must be 64 for fp8_ds_mla
+```
+(Same assert as R-014, now at line 937 in this build's kernel — assert moved, not removed. Confirmed by `strings` on `_C_stable_libtorch.abi3.so`: both `pe_dim must be 64 for fp8_ds_mla` and `rope_dim must be 64, got` are present in the compiled binary.)
+
+**Read:** reached the same furthest stage as R-014 — NCCL init → backend select (`FLASHINFER_MLA_SPARSE_SM120`, sole candidate, `TRITON_MLA` filtered out) → `FLASHINFER_CUTLASS` NVFP4 MoE backend → dummy weights loaded (57.42 GiB, 70 s) → KV init/CUDA-graph memory profiling → **died in `concat_and_cache_mla`**. This **retires "pull a newer vLLM" as a fix path**: the public nightly's `platforms/cuda.py` sm_120 branch is unchanged (still only `[TRITON_MLA, FLASHINFER_MLA_SPARSE_SM120]`), and its compiled kernel still hardcodes `pe_dim == 64`. Notably, the nightly's SM90 branch lacks even the `prefer_fi_sm90` NoPE selector logic the `glm53-flash` dev build carries — i.e. the GLM-5-Next support is a vendor fork, and upstream public vLLM has not merged the sm_120 NoPE path as of 2026-09-16.
+
+**Lesson:** when a runtime gap is "the kernel is built for a different shape," the fix lives in a newer **kernel build**, not in flags or a newer tag of the same branch — check the compiled binary (`strings <.so> | grep <assert>`) before burning an attempt, and check the selector's capability branch before assuming a newer tag changed anything.
+
+**Next:** switch runtime to **SGLang** (NVIDIA's own recipe for this checkpoint is SGLang; local `sglang:dev-glm52-nvfp4` lacks the `Glm5Next` arch — need the newer dev image), or hold for a vendor vLLM image whose sm_120 path handles NoPE DSA. Not a flag problem — do not retry `--kv-cache-dtype` permutations on vLLM sm_120.
+
+---
 
 ### R-014
 **2026-09-15 22:27 local — nvidia/GLM-5.3-Flash-NVFP4 · stage `--dummy`**
@@ -135,45 +168,6 @@ FLASHINFER_MLA_SPARSE_SM120 backend"*). That kernel is shaped for DeepSeek-V3.2 
 carries shape assumptions from whichever model family it was written for. Check `qk_rope_head_dim`
 against the KV format the backend logs before setting `--kv-cache-dtype fp8` on any MLA model. The
 model card recommending FP8 KV was for a different serving stack.
-
-**~~Next: drop `--kv-cache-dtype fp8` and rerun.~~ — WRONG. Corrected below.**
-
-#### Correction · 2026-09-15, later the same evening `[upstream]`
-
-A concurrent session reading the image's own source found that the proposed fix cannot work, and the
-real situation is worse and more decisive. Verified in
-`vllm/platforms/cuda.py` and `vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm120.py`:
-
-1. **On sm_120 there are exactly two MLA backend candidates** — `TRITON_MLA` and
-   `FLASHINFER_MLA_SPARSE_SM120`. Triton is filtered out for this sparse/indexer model (the run
-   logged `out of potential backends: ['FLASHINFER_MLA_SPARSE_SM120']`), leaving one.
-2. **That backend hard-requires fp8**: `if self.kv_cache_dtype != "fp8_ds_mla": raise
-   NotImplementedError("FLASHINFER_MLA_SPARSE_SM120 requires the packed fp8_ds_mla KV cache
-   layout")`. So `KV_CACHE_DTYPE=auto` does not route around the kernel — it fails earlier, at
-   backend construction.
-3. **Its kernel hardcodes `pe_dim == 64`**, the DeepSeek rope shape — which is what we hit.
-
-So on this build **both settings fail, for two different reasons, and no flag combination bridges
-them.** Worse (and decisively): the `else` branch of the same selector contains explicit handling for
-precisely this model shape — `prefer_fi_sm90 = hf.qk_rope_head_dim == 0 and hasattr(hf, "index_topk")`,
-commented *"NoPE sparse MLA (GLM-5-Next shape…) prefer FlashInfer's SM90 FA3 path for every KV dtype
-— BF16 and FP8 alike"*. **Upstream knows this exact model family and has implemented it for SM90
-(Hopper) only.** sm_120 gets the DeepSeek-shaped path.
-
-**Revised conclusion:** GLM-5.3-Flash is **not servable on sm_120 with `vllm/vllm-openai:glm53-flash`
-by any flag combination** — a genuine capability gap, not a misconfiguration. This also explains the
-family's whole history here: the FP8 sibling's Stage-1 attempts (R-004, R-005) died of unrelated
-causes *before* ever reaching a forward pass, so this wall was always there and simply hadn't been
-touched yet.
-
-**Revised next steps**, in order of cost:
-1. **Confirm empirically** — one `--dummy` with `KV_CACHE_DTYPE=auto`. Expect a *backend-selection*
-   failure, not a `pe_dim` assert. Cheap, and converts this entry from `[upstream]` to `[measured]`.
-2. **Force the backend** — `--attention-backend TRITON_MLA` (or `FLASHMLA_SPARSE`) to see whether any
-   non-SM120 path accepts the model on sm_120. Likely rejected by a feature gate; cheap to find out.
-3. **Newer vLLM** — the fix is upstream-shaped (extend the SM90 NoPE path to sm_120). Needs a pull;
-   no local image registers `Glm5Next` except this one.
-4. **SGLang** — the other runtime with a published GLM-5.3 recipe.
 
 **Revised lesson (this is the transferable one):** when a runtime rejects a model, read the
 *backend selector*, not just the failing kernel. `vllm/platforms/cuda.py` branches on

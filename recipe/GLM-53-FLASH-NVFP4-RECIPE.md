@@ -55,10 +55,44 @@ it's NVIDIA's own ModelOpt build with published vLLM/SGLang recipes and benchmar
   combination serves this model on sm_120 with this image.** The same selector's `else` branch
   implements this exact shape (`prefer_fi_sm90 = qk_rope_head_dim == 0 and hasattr(hf, "index_topk")`,
   commented *"GLM-5-Next shape"*) for **SM90 / Hopper only**. `--kv-cache-dtype` is now the
-  `KV_CACHE_DTYPE` env var (default `fp8`, the more informative failure), but that is bookkeeping,
-  not a fix. **Forward paths: a newer vLLM, SGLang, or Hopper hardware.** Full reasoning and the
-  ranked next steps: `RUN-LOG.md` R-014 correction; generalized as KNOWLEDGE.md **P-H**.
-- **Also found (affects every real load):** this vLLM build **silently ignores**
+   `KV_CACHE_DTYPE` env var (default `fp8`, the more informative failure), but that is bookkeeping,
+   not a fix. **Forward paths: a newer *vendor-fork* vLLM, SGLang, or Hopper hardware.** Full
+   reasoning and the ranked next steps: `RUN-LOG.md` R-014 correction; generalized as KNOWLEDGE.md
+   **P-H**.
+
+   **⛔ TESTED 2026-09-16 — public `vllm/vllm-openai:nightly` does NOT fix it (R-015).** Pulled the
+   public nightly (vllm 0.29.1rc1.dev187, flashinfer 0.6.18.post1) and re-ran `--dummy` with
+   otherwise identical flags: same backend, same `fp8_ds_mla` selection, and the same kernel assert
+   (`cache_kernels.cu:937, pe_dim must be 64`). Source inspection: the sm_120 selector branch is
+   unchanged, and the compiled kernel still carries both asserts (`strings` on
+   `_C_stable_libtorch.abi3.so`). The GLM-5-Next NoPE selector logic in `:glm53-flash` is vendor-fork
+   code absent from the public tree. **"Pull a newer public vLLM" is retired as a fix path**; the fix
+   must come from the vendor fork (newer `:glm53-flash`-equivalent) or SGLang. See `RUN-LOG.md` R-015.
+
+   **Why the official GB200 recipe doesn't transfer to this box** — the vLLM recipe catalog
+   (recipes.vllm.ai, GB200 variant) runs `RedHatAI/GLM-5.3-Flash-NVFP4` with `--tensor-parallel-size 4`
+   on **GB200 = B200 = sm_100** with `--kv-cache-dtype fp8`. It works there because the sm_100
+   selector branch picks `FLASHINFER_MLA_SPARSE` with **plain fp8** KV — never `fp8_ds_mla`, so the
+   `pe_dim==64` assert never fires. On pensive (sm_120, 2 GPUs), the only candidate is
+   `FLASHINFER_MLA_SPARSE_SM120`, which mandates `fp8_ds_mla`. TP4 is also not reproducible (we have
+   2 GPUs). `--privileged` there is a GB200 host requirement, not something we adopt. The one flag
+    worth adopting: `VLLM_ENGINE_READY_TIMEOUT_S=3600` (default is 600s — too tight for a 190 GiB
+    ZFS load) — now baked into the launcher as `ENGINE_READY_TIMEOUT_S`.
+ - **A working sm_12x NoPE path exists in a community fork (reference only — P12, not a serving
+   path).** `samuelcardillo/glm-5.3-flash-2x-rtx-pro-6000-blackwell` (2026-09-16) runs GLM-5.3-Flash
+   on 2× RTX PRO 6000 Blackwell 96 GB (PCIe, working P2P) via the digest-pinned
+   `ghcr.io/tpurtell/glm-5.3-flash-exl3-4bpw-2x-rtx:v0.6.0` — a custom vLLM fork (same
+   `0.1.dev20051` lineage as our `:glm53-flash`) carrying a **`B12X_MLA_SPARSE`** attention backend
+   (fork `tpurtell/sparkinfer-glmrt`) that handles the NoPE DSA geometry on Blackwell, *including
+   with `KV_CACHE_DTYPE=fp8_ds_mla`* — the exact format our stock kernel rejects (`pe_dim must be 64`).
+   It also bundles EXL3 4-bit MoE kernels, a custom PCIe all-reduce (`VLLM_ENABLE_PCIE_ALLREDUCE=1`,
+   backend `b12x`) with EP2/DCP2, and DFlash2 (incoai, CC BY-NC-ND 4.0 research license) spec-decode.
+   Its model is a third-party EXL3 4-bit quant (127 GiB) that fits 2×96 GB fully GPU-resident (no
+   offload) — why its 179→1045 tok/s headline (≈65 % draft acceptance) does not transfer to our
+   2×72 GB box or to the 190 GiB NVFP4 weights. **Use:** proves the sm_120 NoPE gap is buildable;
+   the fork is the reference for what an upstream fix looks like. Do not serve from it (P12) — read
+   the source, port the approach into our own image, or wait for a vendor image.
+ - **Also found (affects every real load):** this vLLM build **silently ignores**
   `--max-parallel-loading-workers` (`WARNING [parallel.py:959] ... not supported and will be
   ignored`). That is one of the standing burst-reduction gates in §3.4 — treat it as **not in
   effect** for this image, and rely on `spawn` + the slow ZFS read path instead when Stage 2 runs.
@@ -197,6 +231,8 @@ Also watch `/var/tmp/edac-ce-watch.out` and the capture klog mtime during a real
 | `SPEC_CONFIG` | unset | stage 3, MTP |
 | `EP` | 0 | stage 3, expert parallelism |
 | `NCCL_CUMEM_HOST_ENABLE` | auto | memory-less-node guard, per-launch probe |
+| `BIND_HOST` | `""` | host-side `-p` publish address; `""` = all interfaces (legacy), `100.70.5.43` = tailscale0 only. Engine still binds 0.0.0.0 inside the container (NAT needs it) |
+| `API_KEY` | `""` | `""` = unauthenticated (legacy, current clients depend on it); if set → vLLM `--api-key`, clients send `Authorization: Bearer`. Clients are remote tailnet peers (SYSTEM-SPEC banner, 2026-09-16) |
 
 Fixed flags: `--quantization modelopt --disable-custom-all-reduce
 --max-parallel-loading-workers 1 --enable-auto-tool-choice --tool-call-parser glm47

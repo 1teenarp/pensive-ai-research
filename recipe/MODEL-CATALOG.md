@@ -22,7 +22,7 @@ settings that are known to work (or worked in the past)** on this box (2× RTX P
 | **nvidia/Qwen3.8-Flash-Next-NVFP4** | NVFP4 MoE (125B total / 6B act, +51B ngram) | 124 GB | ~54 GB/GPU + KV (PLE to RAM) | ✅ Proven, not running now (superseded by FP8) | See "Recipe A" below |
 | **unsloth/Qwen3.8-27B-NVFP4** | NVFP4 dense (27B) | 22 GB | ~1 GPU comfortable | ✅ **Worked in past** (llama.cpp/vLLM) | See "Recipe B" below |
 | **Qwen/Qwen3.8-Flash-Next-FP8** | FP8 MoE (same arch as Recipe A, heavier weights) | 173 GB | ~60.5 GB/GPU weight (8GB/wkr offloaded) + KV | ✅ **CURRENT — serving, 256K ctx, ~20-24 tok/s** | See "Recipe C" below |
-| **nvidia/GLM-5.3-Flash-NVFP4** | NVFP4 MoE (320B total / 18B active, ModelOpt, FP8 KV) | 190.5 GiB | TP2 + ~60 GiB CPU offload | ❌ **BLOCKED on sm_120** — no NoPE sparse-MLA backend in `:glm53-flash` (upstream implements this shape for SM90 only); no flag fixes it. Loader/NCCL/backend-selection all proved good first. | `GLM-53-FLASH-NVFP4-RECIPE.md`, RUN-LOG R-014 |
+| **nvidia/GLM-5.3-Flash-NVFP4** | NVFP4 MoE (320B total / 18B active, ModelOpt, FP8 KV) | 190.5 GiB | TP2 + ~60 GiB CPU offload | ❌ **BLOCKED on sm_120** — no NoPE sparse-MLA backend in `:glm53-flash` (upstream implements this shape for SM90 only); no flag fixes it. Public `:nightly` (0.29.1rc1, 2026-09-16) also fails, same assert (R-015). Loader/NCCL/backend-selection all proved good first. | `GLM-53-FLASH-NVFP4-RECIPE.md`, RUN-LOG R-014 + R-015 |
 
 ---
 
@@ -261,7 +261,7 @@ Sizes are on-disk. "Fit" is based on ~128–135 GB usable VRAM (single process) 
 | **nvidia/DeepSeek-V4-Pro-NVFP4** | 819 GB | MoE NVFP4 | huge | ❌ |
 | **nvidia/GLM-5.2-NVFP4** | 426 GB | MoE NVFP4, sparse-attn | huge | ❌ (no Blackwell sparse-MLA backend) |
 | **zai-org/GLM-5.3-Flash** | 305 GB | MoE 320B/18B FP8, KDA+sparse-MLA, 1M ctx | huge | ⚠️ RAM-offload only (~1–2 tok/s TP2+MTP; needs vllm glm53-flash image) — see `GLM-53-FLASH-RECIPE.md` |
-| **nvidia/GLM-5.3-Flash-NVFP4** | 190 GiB | MoE 320B/18B NVFP4 (ModelOpt), KDA+sparse-MLA, 1M ctx, MTP | huge | ⚠️ TP2 + ~60 GiB CPU offload; ~2× lighter weight traffic than the FP8 sibling — download in progress, see `GLM-53-FLASH-NVFP4-RECIPE.md` |
+| **nvidia/GLM-5.3-Flash-NVFP4** | 190 GiB | MoE 320B/18B NVFP4 (ModelOpt), KDA+sparse-MLA, 1M ctx, MTP | huge | ❌ **BLOCKED on sm_120** — no NoPE sparse-MLA backend in `:glm53-flash` (upstream implements this shape for SM90 only); no flag fixes it. Public `:nightly` also fails (R-015). Download complete (33 shards). See `GLM-53-FLASH-NVFP4-RECIPE.md`, RUN-LOG R-014 + R-015 |
 | **madeby561/GLM-5.2-MXFP8-NVFP4-NF3-Hybrid** | 336 GB | MoE | huge | ❌ |
 | **nvidia/Kimi-K2.7-Code-NVFP4** | 543 GB | MoE | huge | ❌ |
 | **moonshotai/Kimi-K2.7-Code** | 546 GB | MoE | huge | ❌ |

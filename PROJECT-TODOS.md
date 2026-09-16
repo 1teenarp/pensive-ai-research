@@ -33,6 +33,30 @@ Get past the SGLang NVFP4 fused-MoE loader shape mismatch (`3072 vs 6144` in `_l
 - Note: vLLM has no sparse+MLA attention backend for sm_120 here (`compute capability not supported`); vendor-proven path is SGLang `dev-glm52-nvfp4`.
 - Bleeding-edge checkpoint; deprioritize if it blocks.
 
+### A4. Decode-throughput optimization — Qwen3.8-Flash-Next-FP8 (Recipe C) — OPENED 2026-09-16
+Live baseline (server as configured 2026-09-16): ~20.8 tok/s @ seqs=1, MTP accept 55.9 % (~3.2 tok/round),
+bottleneck = TP2 host-bounce collectives (~104 blocking all-reduces/round; 99 % util @ ~100 W spin —
+KNOWLEDGE §1). Est. gains below are estimates (P10) — measure each. Rules: one variable per attempt (P2),
+fork the launcher (`serve-qwen38-flash-next-fp8-<variant>.sh`) instead of mutating the proven one,
+`--check`/`--dummy` first (P7), RUN-LOG entry per attempt (P9).
+
+- **A4.1 · Concurrency at shorter ctx — do first (env-only).** `MAX_MODEL_LEN=65536 MAX_NUM_SEQS=4`
+  on a restart (needs a window; current server stays as-is until then). Expected 2–4× *aggregate*
+  via P-J amortization; KV fits (4×65k ≪ 580k pool). Sweep concurrency 1/2/4 with representative
+  agent prompts; report per-client latency alongside aggregate. **Gate first:** confirm tailnet
+  clients tolerate 65k max ctx (target-workload question — ask user).
+- **A4.2 · NCCL socket-path tuning — second attempt.** `NCCL_NSOCKS_PERTHREAD` /
+  `NCCL_SOCKET_NTHREADS` raises + pin each worker to its GPU-local NUMA node; est. 10–30 % (inferred,
+  untested). Re-verify topology after RMA DIMMs land (node 3 memory interacts).
+- **A4.3 · Newer-vLLM probe.** Does a current build get CUSTOM all-reduce or symm-mem working on
+  sm_120 (both fail in today's build — §1)? Retest `SPEC_TOKENS=5` too (§3: ceiling was image-specific).
+  `--check` → `--dummy` first; retire the whole path fast if the selector already says no (R-015 rule).
+- **A4.4 · `iommu=pt` host change — biggest lever, needs USER decision + reboot window** (§1).
+  GRUB flag → reboot → `p2pBandwidthLatencyTest`/`nccl-tests` → if P2P now clean, re-run proven config
+  without `NCCL_P2P_DISABLE=1` (prove on dummy first, P7). Est. 1.5–2.5× decode if it works.
+- **Ruled out — do not re-attempt:** TP2→PP2 (vLLM PLE guard, KNOWLEDGE §2; and batch-1 bubble
+  kills it anyway, P-I). CPU side is not a bottleneck (~3 cores of 56).
+
 ---
 
 ## B. Stability / power-trip — STASHED (hardware debug)

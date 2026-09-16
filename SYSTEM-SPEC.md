@@ -35,6 +35,15 @@ is the curated reference for planning.
 > cat /proc/driver/nvidia/version        # loaded kernel module
 > modinfo nvidia | grep '^version:'      # installed package  -> MUST MATCH
 > ```
+>
+> **Access model (2026-09-16): serve ports are used by remote clients on the Tailscale tailnet, not
+> only localhost.** `pensive` = `100.70.5.43` (`pensive.tail48d18a.ts.net`); own clients hit the 809x
+> engine ports over the tailnet. Until 2026-09-16 every engine published its port on **all host
+> interfaces with no auth** (LAN included) — this is now an explicit choice, not an accident: the four
+> `recipe/serve-*.sh` launchers gained `BIND_HOST` (host-side publish restriction — set
+> `BIND_HOST=100.70.5.43` for tailscale0-only) and `API_KEY` (vLLM `--api-key` / Bearer). Both default
+> to legacy behavior, so nothing changed for currently-running servers. Verify live with:
+> `docker inspect <name> --format '{{json .NetworkSettings.Ports}}'`.
 
 ---
 
