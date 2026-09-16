@@ -1,7 +1,11 @@
 # Model Catalog & Recipes — "pensive" build
 
-Date: 2026-09-06 (RAM figure below is nameplate; **live RAM is currently reduced for DIMM isolation
-testing** — see `SYSTEM-SPEC.md`'s hardware-status banner, do not assume 1 TiB is available right now)
+Date: 2026-09-06, RAM/driver notes updated 2026-09-10 (RAM figure below is nameplate; **live RAM is
+currently ~751 GiB, 6 of 8 DIMMs — 2 confirmed-bad ones pulled for RMA** — see `SYSTEM-SPEC.md`'s
+hardware-status banner for the live table, do not assume 1 TiB is available right now. The
+driver/library version mismatch found 2026-09-10 that was blocking all GPU containers host-wide is
+**resolved as of 2026-09-15** — both `/proc/driver/nvidia/version` and `modinfo nvidia` now read
+580.178.04. Re-check that pair if any container fails at init; it looks model-specific but isn't.)
 Purpose: a catalog of models present under `/trunk/ai/huggingface/models/`, with the **serving
 settings that are known to work (or worked in the past)** on this box (2× RTX PRO 5000 72 GB Blackwell
 = ~144 GB VRAM, 1 TiB RAM nameplate, EPYC 7663 56c, single socket 4-NUMA (NPS4)).
@@ -18,6 +22,7 @@ settings that are known to work (or worked in the past)** on this box (2× RTX P
 | **nvidia/Qwen3.8-Flash-Next-NVFP4** | NVFP4 MoE (125B total / 6B act, +51B ngram) | 124 GB | ~54 GB/GPU + KV (PLE to RAM) | ✅ Proven, not running now (superseded by FP8) | See "Recipe A" below |
 | **unsloth/Qwen3.8-27B-NVFP4** | NVFP4 dense (27B) | 22 GB | ~1 GPU comfortable | ✅ **Worked in past** (llama.cpp/vLLM) | See "Recipe B" below |
 | **Qwen/Qwen3.8-Flash-Next-FP8** | FP8 MoE (same arch as Recipe A, heavier weights) | 173 GB | ~60.5 GB/GPU weight (8GB/wkr offloaded) + KV | ✅ **CURRENT — serving, 256K ctx, ~20-24 tok/s** | See "Recipe C" below |
+| **nvidia/GLM-5.3-Flash-NVFP4** | NVFP4 MoE (320B total / 18B active, ModelOpt, FP8 KV) | 190.5 GiB | TP2 + ~60 GiB CPU offload | ❌ **BLOCKED on sm_120** — no NoPE sparse-MLA backend in `:glm53-flash` (upstream implements this shape for SM90 only); no flag fixes it. Loader/NCCL/backend-selection all proved good first. | `GLM-53-FLASH-NVFP4-RECIPE.md`, RUN-LOG R-014 |
 
 ---
 
@@ -106,8 +111,10 @@ cost of ~2x the GPU-resident weight footprint. Launcher: `recipe/serve-qwen38-fl
   computed dynamically from mamba/attention page-size alignment, not a simple formula; 4 is the
   tested ceiling, don't assume higher values work without retesting).
 - Env: `NCCL_P2P_DISABLE=1`, `VLLM_PLE_CPU_OFFLOAD=1`, `VLLM_QWEN38_PLE_FP8_SCALE=1`,
-  `VLLM_WORKER_MULTIPROC_METHOD=spawn`, `NCCL_CUMEM_HOST_ENABLE=0` (auto-detected — GPU0's local NUMA
-  node is memory-less during the current DIMM isolation testing).
+  `VLLM_WORKER_MULTIPROC_METHOD=spawn`, `NCCL_CUMEM_HOST_ENABLE` auto-detected per-launch (as of
+  2026-09-10 both GPU-local NUMA nodes have memory again, so this resolves to unset/default — it was
+  forced to `0` during the 4-DIMM isolation-testing low point when GPU0's local node was memory-less;
+  the check is harmless to keep running for whenever DIMMs move again).
 - **Do NOT** set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` if also using
   `--kv-offloading-size` — the two are incompatible (vLLM raises a pydantic ValidationError). Not used
   in the final config (see "tried and rejected" below).
@@ -125,6 +132,106 @@ cost of ~2x the GPU-resident weight footprint. Launcher: `recipe/serve-qwen38-fl
 - GPU-resident weight: 54.48 GiB/rank (with the 8GB/worker offload applied); KV cache: ~8.9-10.5 GiB
   available per GPU at `gpu-memory-utilization 0.95`, comfortably covering the ~3.28 GiB/GPU that full
   262144-token context needs.
+- Per-user real-world experience ranges ~10-24 tok/s depending on prompt/acceptance; the numbers above
+  are vLLM-side steady state. See the bottleneck investigation below for *why* it sits there.
+
+### Live runtime memory-location snapshot (2026-09-10 12:54, healthy serve, DRIVER NOW MATCHED)
+
+Verified against a live `qwen38-flash-fp8-serve` using `nvidia-smi --query-compute-apps`, `/proc/*/status`
+(RSS), `/proc/*/fd`, and the model `index.json`. This shows *where each inference component actually
+lives* at runtime (the "disk vs RAM" split the header's VRAM math estimates):
+
+| Component | Location | Live size | Notes |
+|---|---|---|---|
+| Transformer/MoE weights (FP8) | GPU, TP2 split | ~57.6 GiB/card (~115 GiB total) | among "weights + non-torch" consumed memory |
+| PLE n-gram lookup table | **Host RAM** (`PleOffloadWorker`) | ~48.7 GiB (~50 GB RSS) | `VLLM_PLE_CPU_OFFLOAD=1` streams it from RAM |
+| KV cache + Mamba state | GPU | ~8.87 GiB/card | 580,063 tokens, `--max-model-len 262144` |
+| CUDA graphs | GPU | 0.32 GiB/card | capture sizes 1,2,4,8 |
+| Activations (peak) | GPU | ~1.03 GiB | — |
+| Checkpoint (read-only) | Disk `/buffer/cache/models/Qwen3.8-Flash-Next-FP8` | 173 GiB / 131 shards | 48.7 GiB is the PLE table retained on disk |
+| Host RAM total | System | ~751 GiB, ~660 GiB free | — |
+
+Key takeaway: the model is **RAM-heavy, not just VRAM-heavy** — the ~48.7 GiB n-gram/PLE table is the
+single largest component and lives in **host RAM**, not video memory. This is why `VLLM_PLE_CPU_OFFLOAD=1`
++ `--cpu-offload-gb 8` are load-bearing for this recipe: without PLE offload the table would have to
+fit in VRAM (~115 GiB weights + ~49 GiB PLE ≫ 146 GB usable).
+
+Useful one-shot status check:
+```bash
+docker logs qwen38-flash-fp8-serve 2>&1 | grep -E "Available KV cache memory|GPU KV cache size|consumed memory"
+nvidia-smi --query-gpu=memory.used --format=csv,noheader
+# PLE offload worker host-RAM footprint:
+docker top qwen38-flash-fp8-serve | awk '{print $2}' | while read p; do
+  [ -n "$p" ] && grep -qs PleOffload /proc/$p/comm && awk '/VmRSS/{print "PleOffloadWorker rss=" $2/1024 " MB"}' /proc/$p/status
+done
+```
+
+### Generation-speed bottleneck investigation (2026-09-09, live server forensics)
+
+Question: why does decode top out at ~10-24 tok/s? Investigated a 7-h-old live serve via vLLM
+`/metrics`, `nvidia-smi`/DCGM, `nvidia-smi topo -m`, `numactl -H`, kernel cmdline, and model
+config.json. Evidence:
+
+| Observation | Value | Rules in/out |
+|---|---|---|
+| Mean inter-token latency | 156 ms/token (lifetime); steady MTP rounds ~154 ms ÷ ~3.2 accepted ≈ 48 ms/token | — |
+| SM clock / mem clock | 2610 MHz / 13365 MHz, no throttling | rules out thermal/power/clock throttling |
+| GPU power draw | ~100 W of 300 W | rules out compute saturation |
+| GPU memory throughput | 9-12 % (`utilization.memory`) | rules out VRAM bandwidth |
+| GPU "util" 99 % | constant **even with no request in flight** | it's NCCL spin-wait, not work |
+| KV cache usage | 5.3 % during decode | rules out KV/attention pressure |
+| `nvidia-smi topo -m` | GPU0↔GPU1 = **SYS** (PCIe + cross-NUMA hop), no NVLink; `NCCL_P2P_DISABLE=1` + `--disable-custom-all-reduce` | every TP collective bounces through host RAM |
+| NUMA | nodes 2/3 memory-less (interim DIMM pull) → GPU0's rank stages ALL comm buffers + the PLE table on remote node 0/1 via Infinity Fabric | extra cross-node hop on every collective |
+| Kernel cmdline | **no `iommu=pt`**; IOMMU default domain = Translated | classic cause of the historic NCCL P2P hangs on AMD |
+| MTP acceptance (lifetime counters) | 29095/52076 = ~56 % per draft token; per-position 0.75/0.59/0.48/0.40; mean acceptance length ~3.2 | spec decode is working as designed |
+
+Architecture context (config.json): hybrid 48 layers = 36 linear-attention + 12 full-attention;
+512 experts / 10-active, `moe_intermediate_size` 640 (small experts); 20M-entry n-gram PLE table
+(51B params) CPU-offloaded; MTP draft = 1 full-attention layer.
+
+**Bottleneck decomposition.** One ~154 ms MTP round = ~104 *blocking* collectives (verify pass:
+48 layers × 2 all-reduces; plus 4 draft passes), plus FP8 batch-1 MoE/LM-head kernels, plus the PLE
+host→GPU gather ×5 passes:
+1. **Primary (structural): TP2 all-reduce latency over the host-bounce, cross-NUMA path.** ~100
+   sequential GPU→host→(remote node)→GPU round-trips per round. The "99 % util @ 100 W @ 9 % mem"
+   signature is GPUs spinning on NCCL waits. Recipe A's NVFP4 sibling measured 39-55 tok/s on the
+   *same* interconnect, which puts the comm floor around ~20-25 ms/token.
+2. **Secondary (format): the FP8 batch-1 execution path.** CUDA graphs only bought 1.4× here (vs ~4×
+   on NVFP4), and FP8 runs ~3.4× slower than NVFP4 at identical comm settings — the FP8 grouped-MoE /
+   blockwise-scale kernel path at batch 1 is intrinsically expensive on this stack, independent of the
+   wire. (Exact comm-vs-kernel split not yet measured — see fix #1.)
+3. **Tertiary (config): `--max-num-seqs 1`** — zero latency hiding; every collective/kernel is exposed
+   serially. Aggravated by the memory-less node 3 (interim DIMM config).
+4. **Ruled out:** clocks, power cap, VRAM bandwidth, KV pressure, storage, CPU.
+
+**Improvement levers, ranked:**
+1. *Profile to settle 1 vs 2* (~10 min): relaunch with `VLLM_TORCH_PROFILER_DIR` (or nsys — the
+   container already has `SYS_PTRACE`), send a 30-s decode, split the 154 ms round into NCCL-wait vs
+   kernel vs H2D-PLE time.
+2. *Repair PCIe P2P instead of disabling it* (biggest architectural lever): the historic NCCL P2P hang
+   smells like the translated-IOMMU problem — add `iommu=pt` to the kernel cmdline, verify with
+   `p2pBandwidthLatencyTest` / `nccl-tests all_reduce_perf`, then drop `NCCL_P2P_DISABLE=1` and
+   `--disable-custom-all-reduce`. Direct GPU↔GPU PCIe transfers (even cross-root) would slash the
+   per-all-reduce latency floor.
+3. *Reinstall the DIMMs* (restores node 3 memory): GPU0's rank gets local host memory for NCCL staging
+   + the PLE buffer; also re-test P2P afterwards (part of the old "hangs" may have been the
+   memory-less-node cuMem bug, not the topology).
+4. *Trade context for concurrency:* KV math only fits one 262k sequence, but at e.g. 32-64k ctx,
+   `--max-num-seqs 2-4` amortizes the same per-round fixed cost across requests → near-linear
+   aggregate throughput.
+5. *NVFP4 as the daily driver, FP8 for quality-critical traffic* — 39-55 tok/s is already proven on
+   this box (Recipe A).
+6. Marginal: `SPEC_TOKENS=3` (pos-4 acceptance is only ~40 %); NCCL buffer/thread tuning; note the
+   250 W power cap may not even be applying (script warns `nvidia-smi -pl` needs interactive sudo —
+   verified draw was ~100 W, so the cap is not what's limiting speed either way).
+
+Reproduce the forensics:
+```bash
+curl -s localhost:8092/metrics | grep -E "^vllm:(inter_token_latency_seconds_(sum|count)|spec_decode_num_(drafts|accepted_tokens)_total|generation_tokens_total)"
+nvidia-smi --query-gpu=utilization.gpu,utilization.memory,clocks.sm,power.draw --format=csv
+nvidia-smi topo -m; numactl -H | grep size; cat /proc/cmdline   # no iommu=pt
+docker logs qwen38-flash-fp8-serve 2>&1 | grep -A2 SpecDecoding | tail   # per-position acceptance
+```
 
 ---
 
@@ -154,6 +261,7 @@ Sizes are on-disk. "Fit" is based on ~128–135 GB usable VRAM (single process) 
 | **nvidia/DeepSeek-V4-Pro-NVFP4** | 819 GB | MoE NVFP4 | huge | ❌ |
 | **nvidia/GLM-5.2-NVFP4** | 426 GB | MoE NVFP4, sparse-attn | huge | ❌ (no Blackwell sparse-MLA backend) |
 | **zai-org/GLM-5.3-Flash** | 305 GB | MoE 320B/18B FP8, KDA+sparse-MLA, 1M ctx | huge | ⚠️ RAM-offload only (~1–2 tok/s TP2+MTP; needs vllm glm53-flash image) — see `GLM-53-FLASH-RECIPE.md` |
+| **nvidia/GLM-5.3-Flash-NVFP4** | 190 GiB | MoE 320B/18B NVFP4 (ModelOpt), KDA+sparse-MLA, 1M ctx, MTP | huge | ⚠️ TP2 + ~60 GiB CPU offload; ~2× lighter weight traffic than the FP8 sibling — download in progress, see `GLM-53-FLASH-NVFP4-RECIPE.md` |
 | **madeby561/GLM-5.2-MXFP8-NVFP4-NF3-Hybrid** | 336 GB | MoE | huge | ❌ |
 | **nvidia/Kimi-K2.7-Code-NVFP4** | 543 GB | MoE | huge | ❌ |
 | **moonshotai/Kimi-K2.7-Code** | 546 GB | MoE | huge | ❌ |

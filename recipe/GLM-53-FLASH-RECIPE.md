@@ -191,7 +191,9 @@ bash recipe/serve-glm-53-flash.sh --dummy         # load-format dummy, TP2, eage
 died at fp8-MoE finalize to an unresolved software `0xCF9` reset ~3h in, with a capture-coverage gap
 over the actual death window. **Rerun this stage before touching Stage 2** — the launcher now has the
 NUMA/NCCL guard, the TP2 offload-scaling fix, and the capture-liveness check (see §0), none of which
-were in place for the first attempt. Watch `tail -f /var/tmp/serve-glm53.log` and keep an eye on
+were in place for the first attempt. Watch with `bash recipe/serve-glm-53-flash.sh --wait` (or
+`--logs`) — **not** `tail -f /var/tmp/serve-glm53.log`, which holds only the container ID since
+`docker run -d` returns immediately. Keep an eye on
 `docker logs -f powertrip-capture` / klog mtime for the full run, not just at launch — that's exactly
 what went dark last time.
 
@@ -215,8 +217,10 @@ gates, nothing learned is lost (capture + CE deltas tell us the stage it died at
   match for 1 TiB RAM; untested on Blackwell here).
 - **llama.cpp GGUF** (Unsloth guide; recent llama.cpp + `--n-cpu-moe`-style expert-on-CPU split;
   `llamacpp:*` images exist but would need a rebuild).
-- **RedHatAI/GLM-5.3-Flash-NVFP4** (Blackwell-native NVFP4 variant, ~half the bytes/token → ~2× the
-  tok/s) — ~155 GB download; the best perf path once the DIMM is fixed.
+- **nvidia/GLM-5.3-Flash-NVFP4** (NVIDIA ModelOpt NVFP4 variant, ~half the bytes/token vs this FP8
+  build → ~2× the tok/s) — **download started 2026-09-14 (190 GiB, 33 shards)**; dedicated recipe +
+  launcher now live: `recipe/GLM-53-FLASH-NVFP4-RECIPE.md` / `recipe/serve-glm-53-flash-nvfp4.sh`.
+  (RedHatAI/GLM-5.3-Flash-NVFP4 remains as an alternative if the nvidia build misbehaves.)
 
 ## 6. Verdict (updated 2026-09-08, after the Instance 9 rerun)
 

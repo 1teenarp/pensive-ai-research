@@ -194,25 +194,60 @@ launch(){   # $1 = "dummy" | "real"
     --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm45 \
     "${extra[@]}" \
     > "$SERVE_LOG" 2>&1 &
-  log "launched; log=$SERVE_LOG (real load from ZFS: expect 30-60+ min; watch: tail -f $SERVE_LOG)"
+  # `docker run -d` prints only the container ID, so $SERVE_LOG is a 64-char hash and nothing else.
+  # Real vLLM output is in `docker logs`. Never tail $SERVE_LOG for progress (RUN-LOG R-014).
+  log "launched (real load from ZFS: expect 30-60+ min)"
+  log "  progress:  docker logs -f $NAME"
+  log "  wait:      bash $0 --wait"
+  log "  launch err: $SERVE_LOG (container id only if the run started)"
+}
+
+wait_ready(){   # poll until the server binds, the container dies, or we time out
+  local timeout="${WAIT_TIMEOUT:-5400}" t0 elapsed st
+  t0=$(date +%s)
+  log "waiting for $NAME (timeout ${timeout}s); ^C is safe, it does not stop the container"
+  while :; do
+    elapsed=$(( $(date +%s) - t0 ))
+    st="$(docker inspect "$NAME" --format '{{.State.Status}}' 2>/dev/null)"
+    if [ -z "$st" ]; then log "container $NAME is gone"; return 1; fi
+    if [ "$st" != "running" ]; then
+      log "FAILED after ${elapsed}s — container $st (exit $(docker inspect "$NAME" --format '{{.State.ExitCode}}' 2>/dev/null))"
+      docker logs "$NAME" 2>&1 | grep -aE "RuntimeError|ValueError|AssertionError|CUDA error|No valid|not supported" \
+        | grep -avE "otel.py|please check the stack trace" | tail -3 | sed 's/^/[glm53]   /'
+      log "next: snapshot it before cleanup -> bash $REPO_DIR/recipe/run-log.sh --container $NAME --stage <stage>"
+      return 1
+    fi
+    if curl -sf -o /dev/null "http://localhost:${PORT}/v1/models" 2>/dev/null; then
+      log "READY after ${elapsed}s — http://localhost:${PORT}/v1/models"; return 0
+    fi
+    if [ "$elapsed" -ge "$timeout" ]; then log "timed out after ${elapsed}s (still running; keep watching docker logs -f $NAME)"; return 2; fi
+    sleep 15
+  done
 }
 
 status(){
   docker ps -a --filter name="$NAME" --format 'serve: {{.Names}} {{.Status}}'
   nvidia-smi --query-gpu=index,memory.used --format=csv,noheader | sed 's/^/  gpu /'
   free -g | awk 'NR==2{print "  ram used/avail GB: "$3"/"$7}'
-  tail -5 "$SERVE_LOG" 2>/dev/null | sed 's/^/  /'
+  curl -sf -o /dev/null "http://localhost:${PORT}/v1/models" 2>/dev/null \
+    && echo "  http: READY on :$PORT" || echo "  http: not serving on :$PORT"
+  echo "  --- docker logs (last 8) ---"
+  docker logs "$NAME" 2>&1 | tail -8 | sed 's/^/  /'
 }
 
 case "${1:---help}" in
   --check)  check_runtime ;;
   --dummy)  TP=2; check_image; require_gpus_free; resolve_offload_gb; arm_safety; check_numa_topology; launch dummy ;;
   --serve)  check_image; require_gpus_free; resolve_offload_gb; arm_safety; check_numa_topology; drop_caches; launch real ;;
+  --wait)   wait_ready ;;
+  --logs)   docker logs -f "$NAME" ;;
   --stop)   docker rm -f "$NAME" >/dev/null 2>&1 && log "stopped $NAME" || log "no $NAME running" ;;
   --status) status ;;
   *) cat <<EOF
-usage: $0 --check | --dummy | --serve | --stop | --status
-env: IMAGE TP CPU_OFFLOAD_GB MAX_MODEL_LEN MAX_NUM_SEQS GPU_MEM_UTIL GPU_POWER_CAP
+usage: $0 --check | --dummy | --serve | --wait | --logs | --stop | --status
+  --wait    poll until the server binds :$PORT, the container dies, or WAIT_TIMEOUT (default 5400s)
+  --logs    follow the real vLLM output (SERVE_LOG holds only the container id)
+env: IMAGE TP CPU_OFFLOAD_GB MAX_MODEL_LEN MAX_NUM_SEQS GPU_MEM_UTIL GPU_POWER_CAP WAIT_TIMEOUT
 see recipe/GLM-53-FLASH-RECIPE.md for the staged plan and risk gates
 EOF
   ;;
