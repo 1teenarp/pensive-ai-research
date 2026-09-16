@@ -28,6 +28,24 @@ degrading gracefully. Fixed in `recipe/serve-qwen38-flash-next-nvfp4.sh` with a 
 auto-detect (sets `NCCL_CUMEM_HOST_ENABLE=0` only when a GPU's local node is memory-less) — this is not
 a hardware issue, just a heads-up for whichever intermediate DIMM configuration you're testing next.
 
+## Status update — 2026-09-10 (root cause found: TWO bad DIMMs, not one)
+
+Step 2 above is done: the isolation testing found **two** faulty sticks, not one — the original
+channel-G/MM4 suspect (memtest86+ errors) **and** a second stick with physically damaged PCB pads
+(chipped/missing small components) — a silent failure mode that wouldn't necessarily show up as a
+memtest error on its own. Both pulled for RMA; the other 6 known-good sticks reinstalled.
+
+- **Live now: 6 of 8 DIMMs (~751 GiB), all 4 NUMA nodes have memory again** (uneven: node0/2 have 1
+  stick each ~129 GiB, node1/3 have 2 sticks each ~254-258 GiB — see `SYSTEM-SPEC.md` §3 for the
+  current table). Both GPU-local nodes (GPU0→3, GPU1→0) now have memory, so the memory-less-node NCCL
+  segfault noted above doesn't apply right now — the auto-detect in the launcher scripts still carries
+  the check harmlessly for whenever DIMMs move again.
+- **Next:** RMA both bad sticks, reinstall the 2 replacements, return to the full 8-DIMM / 1 TiB config.
+- **Separate, unrelated issue found the same day:** an NVIDIA driver/library version mismatch
+  (kernel module 580.173.02 loaded, package upgraded to 580.178.04 via apt without a reload) is
+  currently blocking `nvidia-smi` and all GPU containers host-wide. Not a DIMM/memory issue — see
+  `SYSTEM-SPEC.md`'s hardware-status banner for the fix options (needs root).
+
 ---
 
 ## 1. What happened (the tripping incident)

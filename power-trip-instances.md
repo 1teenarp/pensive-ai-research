@@ -13,12 +13,21 @@ more verbose logging/pointers when similar events recur.
 > - `power-debug-collect.sh` — safe, idempotent evidence collector.
 > - `README-ramoffload-research.md` — the workloads that tend to trigger trips (RAM+VRAM offload).
 
-> ⚠️ **2026-09-08 status update:** the prime-suspect DIMM (channel G / MM4) and its NUMA-node half (4 of
-> 8 DIMMs) have been **physically removed for isolation/RMA testing**; memtest86 on the remaining
-> ~512 GB came back clean, and no new trips have occurred in this reduced config so far. Read every
-> "hardware fix pending" status below in that light — see `power-trip-diagnosis.md`'s 2026-09-08 status
-> update for the full reinstall plan (identify the specific bad stick → RMA → reinstall the other 7 →
-> reinstall the replacement). This is a live, changing state, not a completed fix.
+> ⚠️ **2026-09-10 update — root cause found, TWO bad DIMMs (not one):** the isolation testing
+> (2026-09-08 entry below) turned up a second faulty stick beyond the original channel-G/MM4 suspect —
+> one with physically damaged PCB pads (chipped/missing small components), a silent failure mode
+> memtest86+ wouldn't necessarily catch. Both are now pulled for RMA; the other 6 known-good sticks are
+> reinstalled (~751 GiB live, all 4 NUMA nodes populated again, unevenly — see `SYSTEM-SPEC.md` §3).
+> No new trips in this 6-DIMM config so far. Read every "hardware fix pending" status below in that
+> light — see `power-trip-diagnosis.md`'s 2026-09-10 status update for the full plan. This is still a
+> live, changing state (2 RMA replacements pending), not a completed fix. Separately, an unrelated
+> NVIDIA driver/library version mismatch found the same day is currently blocking all GPU containers —
+> see `SYSTEM-SPEC.md`'s hardware-status banner, not a DIMM/memory issue.
+>
+> *(Original 2026-09-08 note, kept for history: "the prime-suspect DIMM (channel G / MM4) and its
+> NUMA-node half (4 of 8 DIMMs) have been physically removed for isolation/RMA testing; memtest86 on
+> the remaining ~512 GB came back clean." — superseded by the finding above that a second stick was
+> also bad.)
 
 ---
 

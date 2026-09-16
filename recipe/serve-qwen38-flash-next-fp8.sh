@@ -36,6 +36,12 @@
 #     alignment), so which spec_tokens values satisfy the divisibility isn't a simple formula; 4 is
 #     the confirmed-working ceiling found by testing, don't assume 5+ works without retesting.
 #
+# WHY it's "only" ~10-24 tok/s — full bottleneck forensics (2026-09-09) in recipe/MODEL-CATALOG.md
+# "Recipe C → Generation-speed bottleneck investigation": GPUs idle-spinning at ~100 W/99 %-util on
+# ~104 blocking TP2 all-reduces per MTP round over the host-bounce cross-NUMA path (primary), plus the
+# intrinsically slow FP8 batch-1 MoE kernel path (secondary). Top levers: torch-profiler split,
+# iommu=pt → re-enable PCIe P2P, restore node-3 DIMMs, or concurrency at shorter ctx.
+#
 # Usage:
 #   bash serve-qwen38-flash-next-fp8.sh              # stop any existing, then start
 #   bash serve-qwen38-flash-next-fp8.sh --restart    # same as above (stop+start)
@@ -67,7 +73,7 @@
 set -u
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODEL="${MODEL:-/trunk/ai/huggingface/models/Qwen/Qwen3.8-Flash-Next-FP8}"
+MODEL="${MODEL:-/buffer/cache/models/Qwen3.8-Flash-Next-FP8}"
 IMAGE="${IMAGE:-vllm/vllm-openai:qwen38-flash-next-patched}"
 NAME="${NAME:-qwen38-flash-fp8-serve}"
 PORT="${PORT:-8092}"
