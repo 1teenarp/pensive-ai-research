@@ -221,6 +221,8 @@ gates, nothing learned is lost (capture + CE deltas tell us the stage it died at
   build → ~2× the tok/s) — **download started 2026-09-14 (190 GiB, 33 shards)**; dedicated recipe +
   launcher now live: `recipe/GLM-53-FLASH-NVFP4-RECIPE.md` / `recipe/serve-glm-53-flash-nvfp4.sh`.
   (RedHatAI/GLM-5.3-Flash-NVFP4 remains as an alternative if the nvidia build misbehaves.)
+- **RedHatAI/GLM-5.3-Flash-NVFP4** (Blackwell-native NVFP4 variant, ~half the bytes/token → ~2× the
+  tok/s) — ~155 GB download; the best perf path once the DIMM is fixed.
 
 ## 6. Verdict (updated 2026-09-08, after the Instance 9 rerun)
 
