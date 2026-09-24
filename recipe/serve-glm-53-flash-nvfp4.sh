@@ -1,7 +1,21 @@
 #!/bin/bash
 # serve-glm-53-flash-nvfp4.sh — launcher for nvidia/GLM-5.3-Flash-NVFP4 on this box (2×72 GB, TP2).
-# ModelOpt NVFP4 MoE (320B total / 18B active), 190.4 GiB on disk, FP8 KV, native 1M ctx.
+# ModelOpt NVFP4 MoE (320B total / 18B active), 190.4 GiB on disk, native 1M ctx.
 # Recipe + rationale: recipe/GLM-53-FLASH-NVFP4-RECIPE.md (read §3 gates before --serve).
+#
+# 2026-09-17 sm_120 NoPE port (R-014/R-015 block lifted in software): default IMAGE is now the
+# pensive-derived build `pensive/glm53-flash:nope-sm120-617d0cc` = official vendor-fork base
+# + glm53_sparse_mla (Apache-2.0, Libertai/glm53-flash-vllm-gb10 @ 617d0cc; hand-written NoPE
+# sparse-MLA CUDA kernel installed as vllm.general_plugins, no vLLM file patched; provenance
+# + port notes in recipe §0 and §5). Dockerfile: recipe/Dockerfile.glm53-flash-nope-sm120.
+# The plugin overrides the FLASHINFER_MLA_SPARSE_SM120 slot only when
+# VLLM_GLM53_CUDA_SPARSE_MLA=1 (this launcher sets it); kernel is FIXED to 32 heads/rank =
+# TP2, bf16 KV per shipped backend.py, CUDA graphs per shipped code = NEVER (their README's
+# fp8-KV/UNIFORM_BATCH claims are unconfirmed — verify before re-enabling either).
+# MoE input-scale fix (VLLM_GLM53_MOE_INPUT_SCALE) stays UNSET: nvidia's checkpoint is
+# fully-serialised (verified: 36,297 inline input_scale tensors; base image's loader maps them,
+# routed_experts.py ModelOpt NVFP4 branch). If first serve shows repeated-token garbage, THAT
+# is the fault-2 signature — but expect it impossible here; suspect something else first.
 #
 # Usage:
 #   bash serve-glm-53-flash-nvfp4.sh --check    # offline: image/arch/flashinfer/modelopt + model dir sanity (no GPU)
@@ -12,9 +26,14 @@
 # Env overrides:
 #   MODEL, IMAGE, NAME (glm53-nvfp4-serve), PORT (8092)
 #   TP=2  CPU_OFFLOAD_GB= (auto: 32/worker TP2, 80 TP1)  MAX_MODEL_LEN=8192  MAX_NUM_SEQS=1
-#   GPU_MEM_UTIL=0.90  GPU_POWER_CAP=250  ENFORCE_EAGER=0 (CUDA graphs ON; set 1 if capture trips)
-#   KV_CACHE_DTYPE=fp8   (NB: NEITHER fp8 NOR auto works on sm_120 with this image — the model has no
-#                         NoPE sparse-MLA path here at all. See the block at the variable + R-014.)
+#   GPU_MEM_UTIL=0.90  GPU_POWER_CAP=250  ENFORCE_EAGER=1 (default since the port: shipped plugin
+#                         declares AttentionCGSupport.NEVER; try 0 only after measuring what vLLM does)
+#   KV_CACHE_DTYPE=bfloat16 (NOT auto — see below. The ported kernel supports bf16 only in the
+#                         shipped build; fp8 unverified — their README claims it, code denies it.)
+#   SPARSE_MLA=1         the plugin gate (VLLM_GLM53_CUDA_SPARSE_MLA). 0 = A/B back to stock
+#                         sm_120 selection — which fails per R-014/R-015; keep 1.
+#   MOE_INPUT_SCALE=""   VLLM_GLM53_MOE_INPUT_SCALE; leave unset for this checkpoint (see header).
+#                         Never 1.0 — upstream retracted it (632x median; block-scale underflow).
 #   SPEC_CONFIG='{"method":"mtp","num_speculative_tokens":2}'   # stage-3 only
 #   EP=1  adds --enable-expert-parallel --enable-ep-weight-filter (stage-3; untested at TP2)
 #   NCCL_CUMEM_HOST_ENABLE=auto|0|1   auto probes per-GPU NUMA node memory (memory-less node => force 0)
@@ -34,7 +53,7 @@ set -u
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL="${MODEL:-/trunk/ai/huggingface/models/nvidia/GLM-5.3-Flash-NVFP4}"
-IMAGE="${IMAGE:-vllm/vllm-openai:glm53-flash}"   # fallback: vllm/vllm-openai:nightly
+IMAGE="${IMAGE:-pensive/glm53-flash:nope-sm120-617d0cc}"   # fallback: vllm/vllm-openai:glm53-flash (stock; blocked per R-014/R-015)
 NAME="${NAME:-glm53-nvfp4-serve}"
 PORT="${PORT:-8092}"
 SERVED_MODEL="${SERVED_MODEL:-nvidia/GLM-5.3-Flash-NVFP4}"
@@ -44,19 +63,26 @@ CPU_OFFLOAD_GB="${CPU_OFFLOAD_GB:-}"              # per worker; auto: TP2->32, T
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-1}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.90}"
-# ⛔ READ THIS BEFORE TUNING KV DTYPE. Neither setting works on sm_120 with this image, and the
-# reason is structural, not a misconfiguration (RUN-LOG.md R-014 + correction, KNOWLEDGE.md P-H):
-#   fp8  -> selects the fp8_ds_mla KV format; its kernel hardcodes pe_dim==64 (DeepSeek rope shape)
-#           and GLM-5.3 is NoPE (qk_rope_head_dim=0) => "concat_and_cache_mla ... pe_dim must be 64"
-#   auto -> FLASHINFER_MLA_SPARSE_SM120 raises NotImplementedError ("requires the packed fp8_ds_mla
-#           KV cache layout"), and it is the ONLY MLA candidate left on sm_120 after TRITON_MLA is
-#           filtered out for sparse/indexer models => fails earlier, at backend construction.
-# vllm/platforms/cuda.py implements the NoPE/GLM-5-Next path for SM90 (Hopper) ONLY. Forward paths
-# are a newer vLLM, SGLang, or different hardware — not a flag. Default stays fp8 (the model card's
-# intent, and it reaches further) purely so the failure is the informative one.
-KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"           # fp8 | auto — both currently fail, see above
+# KV DTYPE + BLOCK SIZE (history: R-014/R-015 — stock sm_120 selection had NO NoPE sparse-MLA
+# path: fp8 died in concat_and_cache_mla "pe_dim must be 64"; auto died at backend
+# construction). The ported glm53_sparse_mla plugin (header) lifts that, with two hard
+# constraints now measured on this box (R-017/R-018):
+#   1. KV dtype: the shipped backend advertises only auto|bfloat16, and `auto` does NOT
+#      resolve to the model dtype here — it canonicalized to fp8_e4m3, which the selector
+#      rejected (R-017). fp8 KV is impossible until the .so's fp8 path is verified (their
+#      README claims 6/6 verified; the shipped backend.py denies it). -> bfloat16.
+#   2. Block size: the kpool indexer's DeepGEMM logits kernel (sm_120 non-fp4) asserts the
+#      STORAGE block == 64, and storage = block_size // index_kpool(4) -> block_size 256.
+#      The vLLM default (16) inflates to 2176 via the hybrid "attention page >= mamba page"
+#      rule, and 2176//4 = 544 -> assert (R-018). Their sm_120 deployment pins exactly this:
+#      "Glm5NextIndexerCache asserts block_size % (index_kpool*32)==0 ... 256 -> storage 64,
+#      satisfying both. Do not 'fix' this to 64."
+KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-bfloat16}"        # never auto (see 1); fp8 blocked until .so verified
+BLOCK_SIZE="${BLOCK_SIZE:-256}"                     # see (2); 128 breaks the kpool guard, 512+ breaks DeepGEMM
+SPARSE_MLA="${SPARSE_MLA:-1}"                        # plugin gate VLLM_GLM53_CUDA_SPARSE_MLA (1=ported NoPE kernel)
+MOE_INPUT_SCALE="${MOE_INPUT_SCALE:-}"               # VLLM_GLM53_MOE_INPUT_SCALE; unset = off (correct here)
 ENGINE_READY_TIMEOUT_S="${ENGINE_READY_TIMEOUT_S:-3600}"  # engine-ready timeout; default 600s is tight for a 190 GiB ZFS load (adopted from the GB200 recipe)
-ENFORCE_EAGER="${ENFORCE_EAGER:-0}"               # 0 = CUDA graphs ON (target); 1 = eager fallback
+ENFORCE_EAGER="${ENFORCE_EAGER:-1}"                 # shipped plugin declares CG support NEVER -> eager default; test 0 only after measuring
 SPEC_CONFIG="${SPEC_CONFIG:-}"                    # e.g. '{"method":"mtp","num_speculative_tokens":2}'
 EP="${EP:-0}"                                     # 1 = --enable-expert-parallel --enable-ep-weight-filter
 NCCL_CUMEM_HOST_ENABLE="${NCCL_CUMEM_HOST_ENABLE:-auto}"
@@ -114,6 +140,22 @@ except Exception as e:
     print(f'WARN: could not verify modelopt loader: {e}')
 print(f'OK: vllm={vllm.__version__} flashinfer={fi} archs={[a for a in archs if \"Glm5\" in a]}')
 " || die "runtime check FAILED: wrong/old image"
+  [ "$IMAGE" = "${IMAGE#pensive/}" ] && { log "image is not a pensive build; skipping plugin assertions"; return 0; }
+  log "checking glm53_sparse_mla plugin inside $IMAGE (CPU-only)"
+  docker run --rm --entrypoint python3 "$IMAGE" -u -c "
+import importlib.metadata as md, os
+eps = {e.name: e.value for e in md.entry_points(group='vllm.general_plugins')}
+assert 'glm53_sparse_mla' in eps, 'sparse-MLA plugin entry point missing (image lacks the port)'
+import glm53_sparse_mla, glob
+p = os.path.dirname(glm53_sparse_mla.__file__)
+assert glob.glob(p + '/_C*.so'), 'AOT kernel .so missing from ' + p
+from vllm.v1.attention.backends.registry import AttentionBackendEnum as E
+assert E.FLASHINFER_MLA_SPARSE_SM120.get_path().startswith('vllm.'), 'plugin must be inert without the env gate'
+os.environ['VLLM_GLM53_CUDA_SPARSE_MLA'] = '1'
+import glm53_sparse_mla.backend as B
+assert B.register() is True and E.FLASHINFER_MLA_SPARSE_SM120.get_path().startswith('glm53_sparse_mla'), 'override failed'
+print('OK: glm53_sparse_mla installed, inert-until-gated, override verified')
+" || die "plugin check FAILED: rebuild from recipe/Dockerfile.glm53-flash-nope-sm120"
 }
 
 check_model_present(){   # $1 = required: "config" | "all"
@@ -241,6 +283,11 @@ launch(){   # $1 = "dummy" | "real"
   [ "$ENFORCE_EAGER" = "1" ] && extra+=(--enforce-eager)
   [ "$EP" = "1" ] && extra+=(--enable-expert-parallel --enable-ep-weight-filter)
   [ -n "$SPEC_CONFIG" ] && extra+=(--speculative-config "$SPEC_CONFIG")
+  # Reasoning parser is deepseek_r1, NOT glm45, despite the model card's SGLang recipe naming it.
+  # LibertAI trap (sm_120-verified): the chat template puts the OPENING think-open token as the
+  # last PROMPT token, so output only ever carries the closer; glm45's state machine never opens
+  # a span and silently returns empty content with nonzero completion_tokens. deepseek_r1
+  # terminates on the bare closer. Provenance: recipe §0 port note (LibertAI traps).
   local api_args=()
   [ -n "$API_KEY" ] && api_args+=(--api-key "$API_KEY")
   local publish="$PORT:8000"
@@ -249,8 +296,11 @@ launch(){   # $1 = "dummy" | "real"
   if [ -n "${RESOLVED_CUMEM_HOST_ENABLE:-}" ]; then
     cumem_env+=(-e "NCCL_CUMEM_HOST_ENABLE=${RESOLVED_CUMEM_HOST_ENABLE}")
   fi
+  local plugin_env=(-e "VLLM_GLM53_CUDA_SPARSE_MLA=$SPARSE_MLA")
+  [ -n "$MOE_INPUT_SCALE" ] && plugin_env+=(-e "VLLM_GLM53_MOE_INPUT_SCALE=$MOE_INPUT_SCALE") \
+    && log "WARNING: MOE_INPUT_SCALE=$MOE_INPUT_SCALE set — only correct for weight-only NVFP4 checkpoints; this one is fully serialised"
   docker rm -f "$NAME" >/dev/null 2>&1
-  log "launching $NAME mode=$mode TP=$TP offload=${CPU_OFFLOAD_GB}GB/wkr ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS mem_util=$GPU_MEM_UTIL eager=$ENFORCE_EAGER NCCL_CUMEM_HOST_ENABLE=${RESOLVED_CUMEM_HOST_ENABLE:-<default>} publish=${BIND_HOST:-<all-ifaces>}:${PORT} auth=$([ -n "$API_KEY" ] && echo on || echo off)"
+  log "launching $NAME mode=$mode TP=$TP offload=${CPU_OFFLOAD_GB}GB/wkr ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS mem_util=$GPU_MEM_UTIL kv=$KV_CACHE_DTYPE block=$BLOCK_SIZE eager=$ENFORCE_EAGER sparse_mla=$SPARSE_MLA NCCL_CUMEM_HOST_ENABLE=${RESOLVED_CUMEM_HOST_ENABLE:-<default>} publish=${BIND_HOST:-<all-ifaces>}:${PORT} auth=$([ -n "$API_KEY" ] && echo on || echo off)"
   nohup docker run -d --name "$NAME" \
     --gpus all --shm-size 16g --ipc=host \
     --cap-add SYS_PTRACE --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
@@ -259,17 +309,18 @@ launch(){   # $1 = "dummy" | "real"
     -e VLLM_WORKER_MULTIPROC_METHOD=spawn \
     -e VLLM_ENGINE_READY_TIMEOUT_S="$ENGINE_READY_TIMEOUT_S" \
     -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    "${plugin_env[@]}" \
     "${cumem_env[@]}" \
     "$IMAGE" \
     /model --tensor-parallel-size "$TP" --quantization modelopt \
     --served-model-name "$SERVED_MODEL" \
     --cpu-offload-gb "$CPU_OFFLOAD_GB" \
     --max-model-len "$MAX_MODEL_LEN" --max-num-seqs "$MAX_NUM_SEQS" \
-    --gpu-memory-utilization "$GPU_MEM_UTIL" --kv-cache-dtype "$KV_CACHE_DTYPE" \
+    --gpu-memory-utilization "$GPU_MEM_UTIL" --kv-cache-dtype "$KV_CACHE_DTYPE" --block-size "$BLOCK_SIZE" \
     --disable-custom-all-reduce --max-parallel-loading-workers 1 \
     --host 0.0.0.0 \
     "${api_args[@]}" \
-    --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm45 \
+    --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser deepseek_r1 \
     "${extra[@]}" \
     > "$SERVE_LOG" 2>&1 &
   # NOTE: `docker run -d` returns immediately and prints only the container ID, so $SERVE_LOG holds
@@ -327,8 +378,8 @@ usage: $0 --check | --dummy | --serve | --wait | --logs | --stop | --status
   --wait    poll until the server binds :$PORT, the container dies, or WAIT_TIMEOUT (default 3600s)
   --logs    follow the real vLLM output (SERVE_LOG holds only the container id)
 env: MODEL IMAGE NAME PORT TP CPU_OFFLOAD_GB MAX_MODEL_LEN MAX_NUM_SEQS GPU_MEM_UTIL
-       GPU_POWER_CAP KV_CACHE_DTYPE ENGINE_READY_TIMEOUT_S ENFORCE_EAGER SPEC_CONFIG EP
-       NCCL_CUMEM_HOST_ENABLE SERVE_LOG WAIT_TIMEOUT BIND_HOST API_KEY
+       GPU_POWER_CAP KV_CACHE_DTYPE BLOCK_SIZE ENGINE_READY_TIMEOUT_S ENFORCE_EAGER SPEC_CONFIG EP
+       SPARSE_MLA MOE_INPUT_SCALE NCCL_CUMEM_HOST_ENABLE SERVE_LOG WAIT_TIMEOUT BIND_HOST API_KEY
 see recipe/GLM-53-FLASH-NVFP4-RECIPE.md for the staged plan and risk gates
 EOF
   ;;

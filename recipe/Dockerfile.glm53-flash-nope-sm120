@@ -1,0 +1,38 @@
+# Dockerfile.glm53-flash-nope-sm120 — pensive-derived image for GLM-5.3-Flash on sm_120.
+#
+# Base: vllm/vllm-openai:glm53-flash (vendor fork, PR #53906 snapshot — the image whose
+#       loader we verified maps ModelOpt-NVFP4 per-expert input_scale tensors).
+# Adds: glm53_sparse_mla (NoPE sparse-MLA CUDA kernel + vllm.general_plugins backend
+#       override + env-gated MoE input-scale fix) from
+#       https://github.com/Libertai/glm53-flash-vllm-gb10 @ 617d0ccc7a6cd95b5a76b4b7a73f038409150dc1
+#       (Apache-2.0). P12 provenance: we build from the vendor-published base + audited
+#       Apache-2.0 source; we do NOT run their published container.
+#
+# Build context = a clean clone of the repo above (Dockerfile copied in untracked):
+#   git clone https://github.com/Libertai/glm53-flash-vllm-gb10 && cd glm53-flash-vllm-gb10
+#   cp <repo>/recipe/Dockerfile.glm53-flash-nope-sm120 .
+#   docker build -f Dockerfile.glm53-flash-nope-sm120 -t pensive/glm53-flash:nope-sm120-617d0cc .
+#
+# The .so is built INSIDE the image (libtorch + Python-ABI tagged, torch 2.13.0+cu130,
+# nvcc 13.0). GLM53_ARCHS=120a only — our cards; compute_120 PTX fallback is added by
+# their setup.py. --use_fast_math is deliberately absent upstream; do not add it.
+# Plugins are inert unless the launcher sets VLLM_GLM53_CUDA_SPARSE_MLA /
+# VLLM_GLM53_MOE_INPUT_SCALE — merely running this image changes nothing.
+
+FROM vllm/vllm-openai:glm53-flash
+
+COPY kernel /opt/glm53-sparse-mla/kernel
+
+# Source tree is deleted after install: an in-image copy of glm53_sparse_mla/ without a
+# compiled .so SHADOWS the installed package for any process whose cwd is that dir, and
+# its dev-JIT fallback then probes for a GPU (fails during `docker build`, and inside a
+# CPU-only --check). The installed package loads its AOT _C*.so with no driver present
+# (verified 2026-09-17: import OK without --gpus).
+RUN cd /opt/glm53-sparse-mla/kernel \
+ && GLM53_ARCHS=120a MAX_JOBS=8 pip install --no-build-isolation --no-deps . \
+ && rm -rf /opt/glm53-sparse-mla /root/.cache/pip \
+ && cd / && python3 -c "import glob, os, torch, glm53_sparse_mla; \
+p=os.path.dirname(glm53_sparse_mla.__file__); \
+assert glob.glob(p+'/_C*.so'), 'AOT extension missing from '+p; \
+assert hasattr(torch.ops.glm53_sparse_mla, 'sparse_fwd'), 'op not registered'; \
+print('glm53_sparse_mla OK:', p)"

@@ -122,6 +122,58 @@ handling is vendor-fork code.
 **Use:** `--check` passing proves registration only. "Pull a newer public vLLM" is **retired** as a
 fix path for GLM-5.3 on sm_120; a fix must come from the vendor fork or another runtime.
 
+**`vllm/vllm-openai:glm53-flash-cu129` is NOT a newer fix — same 2026-09-09 code, CUDA-12.9 base.**
+`[measured 2026-09-16, Docker Hub API]` All `glm53*` tags were pushed 2026-09-09 13:31–13:32Z in one
+batch; the multi-arch `:glm53-flash` R-014 ran is the same code. The `pe_dim==64` assert lives in
+vLLM's own `cache_kernels.cu` and the SM90-only NoPE selector is Python — a CUDA-base rebuild changes
+neither (the assert also reproduced on a completely different `:nightly` build).
+**Use:** don't pull cu129/cu130 variants expecting a fix.
+
+**SGLang's real DSA-backend flags are `--dsa-prefill-backend` / `--dsa-decode-backend`** with
+`choices = ['flashmla_sparse','flashmla_kv','flashmla_auto','fa3','tilelang','aiter','trtllm']`
+(`[measured 2026-09-16]` in `lmsysorg/sglang:dev-glm52-nvfp4`; `--dsa-attention-backend` /
+`--dsa-moe-backend` do not exist). A `tilelang` DSA path is real and JIT-compiles rather than
+requiring prebuilt Hopper kernels — the SGLang hope for NoPE on sm_120 survives — but this image
+lacks `Glm5Next` and its NVFP4 MoE loader already failed on GLM-5.2 (R-000b). Existence ≠ sm_120
+support ≠ speed; needs a staged test on a free GPU pair.
+
+**The sm_120 NoPE block is solvable without patching vLLM: `Libertai/glm53-flash-vllm-gb10` (Apache-2.0)
+ships the fix as a pip-installable `vllm.general_plugins` package.** `[upstream 2026-09-16, repo read]`
+Two env-gated entry points (`VLLM_GLM53_CUDA_SPARSE_MLA=1` overrides the `FLASHINFER_MLA_SPARSE_SM120`
+enum slot with a hand-written NoPE CUDA kernel, head_size 512 native so the `pe_dim==64` path is never
+reached; `VLLM_GLM53_MOE_INPUT_SCALE` for fault 2, below). No vLLM file is edited; the `.so` is built
+**inside** the target container (`GLM53_ARCHS=120a`); its `backend.py` explicitly targets the same
+`glm53-flash` vendor-fork image we run and feature-detects upstream drift. Kernel is fixed to **32
+heads/rank = TP2 on 64 heads** — exactly pensive's config. Measured by them: sm_120 on 4x RTX PRO 6000
+TP4 (README claims; `backend.py` enforces 32/rank — verify at port), graphs per README `UNIFORM_BATCH`
+(per code `NEVER` — verify), **bf16 KV only per code** (fp8 claim in README unconfirmed).
+**Use:** P12-clean path = build a derived image `FROM vllm/vllm-openai:glm53-flash` +
+`pip install` their `kernel/`; do not run their image.
+
+**Fault 2 (ModelOpt NVFP4 `w13_input_scale` uninitialised → MoE outputs ×0 → "locklock" garbage)
+does NOT fire on `nvidia/GLM-5.3-Flash-NVFP4`.** `[measured 2026-09-16/17]` — 36,297 `input_scale`
+tensors present (full 42×288×3 coverage), sampled values nonzero (7.5e-4 … 3.7e-2), and the
+`:glm53-flash` base image's `routed_experts.py` contains the ModelOpt-NVFP4 branch that maps the
+per-expert `*_proj.input_scale` checkpoint tensors into `w13/w2_input_scale` (init sentinel there
+is 1.0, and 1.0 is itself bad per their correction — but ours are loaded). It is a checkpoint
+property, not a GPU property; theirs had `"input_activations": null` + zero `input_scale` tensors.
+**Use:** leave `VLLM_GLM53_MOE_INPUT_SCALE` unset for the nvidia checkpoint; but since the fault is
+silent-garbage, the first serve must include a correctness probe (arithmetic/factual prompts), not
+just liveness. → also a standing check for any future third-party NVFP4 quant.
+
+**Build-time facts for kernel-in-image ports on `vllm/vllm-openai` (torch 2.13.0+cu130, nvcc 13.0,
+ninja present, no git)** `[measured 2026-09-17]` — (a) `pip install` of a CUDAExtension whose name
+is `pkg._C` imports the parent package at metadata time (`find_spec` semantics); if that `__init__`
+has a GPU-probing JIT fallback, the build dies unless the source tree is gone or cwd isn't it.
+(b) An installed AOT `_C*.so` **loads fine with no driver present** — CPU-only `--check` stages can
+assert its presence and even `torch.ops` registration; only real kernel launches need the GPU.
+**Use:** in Dockerfiles, `pip install`, delete the source tree, then verify from `cd /`.
+
+**Never `rm -rf` a bind-mount path from inside a container to "clean up"** — it deletes the HOST
+directory's contents and fails only at the mount point itself (`Device or resource busy` is not
+protection). Cost: the vendor clone's `kernel/` tree, recovered with `git checkout --`.
+**Use:** unmount-aware cleanup only; inside probes should treat mounted data as read-only by habit.
+
 **`VLLM_ENGINE_READY_TIMEOUT_S` defaults to 600 s** `[measured 2026-09-16, nightly]` — too tight for
 a large cold load from ZFS (190 GiB at ~175 MB/s is well past it).
 **Use:** raise it for any big first load; the GLM NVFP4 launcher exposes it as
@@ -204,6 +256,12 @@ native **1,048,576** ctx · parsers `--tool-call-parser glm47 --reasoning-parser
   **Use:** don't burn attempts on flags, and don't pull a newer *public* vLLM — that path is retired
   (R-015). What's left: a newer **vendor-fork** image, SGLang, or Hopper/`sm_100` hardware.
   → RUN-LOG R-014 + its correction, R-015
+  **⚠️ CORRECTION 2026-09-24 (R-019/R-020): this claim is now scoped to *stock* vLLM images.** Our
+  own derived image `pensive/glm53-flash:nope-sm120-617d0cc` (P12-clean port of the Apache-2.0
+  `glm53_sparse_mla` NoPE kernel) **serves the nvidia NVFP4 checkpoint end-to-end on sm_120** —
+  real weights, coherent output, ~2.4–2.5 tok/s steady (eager, no MTP, comm-bound; bf16 KV,
+  block 256, TP2, 32 GB/wkr offload). The ⛔ still holds for stock images and for the zai-org FP8
+  checkpoint on any vLLM we have.
 - **KV is cheap, weights are the constraint.** 34 of 45 layers hold fixed-size conv/recurrent state;
   only the 11 DSA layers keep compressed MLA KV. Long context costs little — spend the budget on
   weights, and don't size this family with the dense KV formula.

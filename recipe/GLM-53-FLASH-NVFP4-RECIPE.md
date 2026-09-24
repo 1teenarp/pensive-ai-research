@@ -1,11 +1,20 @@
 # GLM-5.3-Flash-NVFP4 (nvidia) on "pensive" — recipe
 
-Date: 2026-09-14, updated 2026-09-15. Status: **⛔ BLOCKED — not servable on this hardware with this
-runtime.** Stage 1 (`--dummy`) ran 2026-09-15 and died at KV-cache init; investigation of the image's
-backend selector shows sm_120 has **no NoPE sparse-MLA path at all** (upstream implements this exact
-model shape for SM90/Hopper only), so no flag combination will serve it here. The NVFP4 loader,
-sparse-MLA selection and TP2 NCCL all proved good on the way. Forward paths: newer vLLM, SGLang, or
-Hopper. See §0 and the `RUN-LOG.md` R-014 correction.
+Date: 2026-09-14, updated 2026-09-17, **Stage 2 proven 2026-09-24 (R-020)**. Status:
+**🟠 SERVING (offload tier) — first real-weights serve 2026-09-24: ~2.4–2.5 tok/s measured steady
+state (eager, no MTP, comm-bound), correctness probe passed (coherent output). Stage 3 next (MTP first).**
+The sm_120 NoPE sparse-MLA block (R-014/R-015: stock images have no attention path for this
+shape; fp8 asserts `pe_dim==64`, auto dies at backend construction) is **solved in our own image**:
+`pensive/glm53-flash:nope-sm120-617d0cc` = official `:glm53-flash` base + the Apache-2.0
+`glm53_sparse_mla` NoPE kernel ported per P12 (built from source, not the community image).
+`--check` passes against it (2026-09-17, CPU-only). **Stage 1 `--dummy` PASSED 2026-09-24 (R-019):
+READY after 1537 s with `KV_CACHE_DTYPE=bfloat16` + `BLOCK_SIZE=256` (R-017/R-018 fixes) — the full
+NoPE sparse-MLA + DSA-indexer forward path runs on sm_120, server binds, completions round-trip.**
+Next: Stage 3 increments, one variable at a time — **MTP first** (`SPEC_CONFIG`
+`num_speculative_tokens=2`; expect ~2.5–3× on a comm-bound box per P-J; the FP8 sibling crashed at 4,
+start at 2), then a `VLLM_TORCH_PROFILER_DIR` round to split one decode round into NCCL-wait vs
+kernel vs H2D-gather (RUN-LOG R-020 Next). See §0 port entry. History of the block below is kept
+as written.
 Launcher: `recipe/serve-glm-53-flash-nvfp4.sh` (`--check` → `--dummy` → `--serve`).
 
 This is the **NVIDIA ModelOpt NVFP4** variant of the same 320B/18B-active MoE as
@@ -68,6 +77,33 @@ it's NVIDIA's own ModelOpt build with published vLLM/SGLang recipes and benchmar
    `_C_stable_libtorch.abi3.so`). The GLM-5-Next NoPE selector logic in `:glm53-flash` is vendor-fork
    code absent from the public tree. **"Pull a newer public vLLM" is retired as a fix path**; the fix
    must come from the vendor fork (newer `:glm53-flash`-equivalent) or SGLang. See `RUN-LOG.md` R-015.
+
+   **✅ PORTED 2026-09-17 — the block is lifted in our own image (P12-clean).**
+   `Libertai/glm53-flash-vllm-gb10` @ `617d0cc` (Apache-2.0) ships the fix as a pip-installable
+   `vllm.general_plugins` package — **no vLLM file is patched**, and the plugin is inert unless
+   `VLLM_GLM53_CUDA_SPARSE_MLA=1`. Method: a hand-written NoPE sparse-MLA CUDA kernel
+   (`mma.sync`, sized for 101,376 B smem) that registers itself into the
+   `FLASHINFER_MLA_SPARSE_SM120` enum slot (head_size 512 native — `pe_dim==64` never reached)
+   and reports all tokens as decode tokens so no dense-MHA prefill backend is ever needed.
+   Their lane B ran it on sm_120 (4× RTX PRO 6000). Built via
+   `recipe/Dockerfile.glm53-flash-nope-sm120`: `FROM vllm/vllm-openai:glm53-flash` +
+   `GLM53_ARCHS=120a pip install ./kernel` **inside** the image (libtorch/ABI-tagged `.so`),
+   source tree deleted post-install (an in-image source copy with no `.so` SHADOWS the installed
+   package and its dev-JIT fallback probes for a GPU — cost one failed build; same trap class as
+   theirs). Provenance: clean clone at `~/Workspace/vendor/glm53-flash-vllm-gb10`; local build
+   fixes recorded in the Dockerfile comments. `--check` (CPU-only) passes on the derived image
+   2026-09-17: plugin entry points discovered, override verified, inert-without-gate verified.
+   Loader-side verification for the MoE input-scale fault (their "fault 2"): the nvidia checkpoint
+   is fully serialised — 36,297 inline `input_scale` tensors (measured, nonzero) and this base
+   image's `routed_experts.py` contains the ModelOpt-NVFP4 branch that maps them per-shard, so
+   `VLLM_GLM53_MOE_INPUT_SCALE` stays **unset** (their constant-1.0 workaround was retracted in
+   the pinned commit anyway: 632× the calibrated median → fp8 block-scale underflow → intermittent
+   repetition). Remaining unknowns for Stage 1/2: shipped code declares CG support `NEVER` and
+   bf16-KV-only (their README claims graphs `UNIFORM_BATCH` and fp8 KV — code wins until proven);
+   heads/rank must be 32 (= TP2 ✓); correctness probe (not just liveness) after first serve, since
+   the failure mode this whole saga came from was *silent garbage*. Reasoning parser switched to
+   `deepseek_r1` per their sm_120-verified trap (`glm45` silently empties responses because this
+   template emits the opener in the prompt). Two build-time lessons promoted to KNOWLEDGE.md §2.
 
    **Why the official GB200 recipe doesn't transfer to this box** — the vLLM recipe catalog
    (recipes.vllm.ai, GB200 variant) runs `RedHatAI/GLM-5.3-Flash-NVFP4` with `--tensor-parallel-size 4`
@@ -220,14 +256,16 @@ Also watch `/var/tmp/edac-ce-watch.out` and the capture klog mtime during a real
 | Env | Default | Notes |
 |---|---|---|
 | `MODEL` | `/trunk/ai/huggingface/models/nvidia/GLM-5.3-Flash-NVFP4` | |
-| `IMAGE` | `vllm/vllm-openai:glm53-flash` | same image as the FP8 recipe (Glm5Next archs + FlashInfer ≥0.6.17, verified by `--check`); fallback `:nightly` |
+| `IMAGE` | `pensive/glm53-flash:nope-sm120-617d0cc` | vendor-fork base + ported NoPE plugin (build: `recipe/Dockerfile.glm53-flash-nope-sm120`); fallback `vllm/vllm-openai:glm53-flash` runs stock selection and fails per R-014/R-015 |
 | `NAME` / `PORT` | `glm53-nvfp4-serve` / `8092` | distinct from the FP8 serve (8091) |
 | `TP` | 2 | 2-GPU box; the card's TP4/EP recipe (GB200) is not reproducible here |
 | `CPU_OFFLOAD_GB` | auto: 32 (TP2) / 80 (TP1), per worker | raise if load OOMs; measure the actual resident/offloaded split after first serve |
 | `MAX_MODEL_LEN` / `MAX_NUM_SEQS` | 8192 / 1 | stage-3 levers |
 | `GPU_MEM_UTIL` | 0.90 | |
-| `KV_CACHE_DTYPE` | `fp8` | ⛔ **Neither value works on sm_120 with this image** — `fp8` asserts `pe_dim==64` in the kernel, `auto` is rejected at backend construction. Not a tuning knob; see §0 correction. |
-| `ENFORCE_EAGER` | 0 (graphs ON) | set 1 if graph capture trips |
+| `KV_CACHE_DTYPE` | `auto` (=bf16) | what the ported kernel supports per shipped `backend.py`; **do not set `fp8`** until the `.so`'s fp8 path is verified (README claims it, code denies it). Pre-port history: both fp8 and auto failed on stock sm_120 selection (R-014/R-015) |
+| `ENFORCE_EAGER` | 1 | shipped plugin declares `AttentionCGSupport.NEVER` → eager is the honest default; try 0 only after measuring what vLLM actually does with the declaration |
+| `SPARSE_MLA` | 1 | plugin gate `VLLM_GLM53_CUDA_SPARSE_MLA`; 0 = A/B back to stock selection (fails per R-014/R-015) — keep 1 |
+| `MOE_INPUT_SCALE` | unset | `VLLM_GLM53_MOE_INPUT_SCALE`; correct only for weight-only NVFP4 checkpoints — ours is fully serialised, see §0 port note; never `1.0` |
 | `SPEC_CONFIG` | unset | stage 3, MTP |
 | `EP` | 0 | stage 3, expert parallelism |
 | `NCCL_CUMEM_HOST_ENABLE` | auto | memory-less-node guard, per-launch probe |
@@ -236,8 +274,10 @@ Also watch `/var/tmp/edac-ce-watch.out` and the capture klog mtime during a real
 
 Fixed flags: `--quantization modelopt --disable-custom-all-reduce
 --max-parallel-loading-workers 1 --enable-auto-tool-choice --tool-call-parser glm47
---reasoning-parser glm45`; env `NCCL_P2P_DISABLE=1 VLLM_PLE_CPU_OFFLOAD=1
-VLLM_WORKER_MULTIPROC_METHOD=spawn PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`; caps
+--reasoning-parser deepseek_r1` (switched from `glm45` per the LibertAI empty-response trap,
+§0 port note); env `NCCL_P2P_DISABLE=1 VLLM_PLE_CPU_OFFLOAD=1
+VLLM_WORKER_MULTIPROC_METHOD=spawn PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+VLLM_GLM53_CUDA_SPARSE_MLA=$SPARSE_MLA`; caps
 `SYS_PTRACE`, seccomp/apparmor unconfined.
 
 ## 6. Verdict (provisional, 2026-09-14)

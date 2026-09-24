@@ -53,6 +53,11 @@ a full entry whenever something failed, surprised you, or moved a number.
 
 | # | Date (local) | Model · stage | Changed | Outcome | Detail |
 |---|---|---|---|---|---|
+| **R-020** | 2026-09-24 | GLM-5.3-Flash-NVFP4 · `--serve` | stage `dummy` (R-019) → real 190 GiB weights; flags unchanged | **PASSED — first end-to-end real-weights serve of this model on pensive.** READY after 2637 s (~44 min); coherent output (correctness probe passed); **~2.4–2.5 tok/s** steady, comm-bound (NCCL spin-wait signature: 100 % util / 6 % mem / ~100 W). | [below](#r-020) |
+| **R-019** | 2026-09-24 00:58 | GLM-5.3-Flash-NVFP4 · `--dummy` | `BLOCK_SIZE` 16 → 256 (R-018's "Next"; launcher default) | **PASSED — READY after 1537 s (~25.6 min).** Full NoPE sparse-MLA + DSA-indexer forward path now works on sm_120 (ported kernel, kv bfloat16, block 256, eager). Deepest stage ever: NCCL → plugin backend select → dummy load → KV/kpool alloc → decode warmup → **server up**. | [below](#r-019) |
+| **R-018** | 2026-09-17 00:22 | GLM-5.3-Flash-NVFP4 · `--dummy` | `KV_CACHE_DTYPE` auto → `bfloat16` | **Failed at first decode warmup (1553 s)** — deepest yet: plugin backend selected, KV + kpool caches allocated, died in DeepGEMM `fp8_fp4_paged_mqa_logits`: sm_120 non-fp4 asserts `block_kv == 64`, but hybrid page-alignment inflated block 16→2176, so storage = 2176//kpool(4) = 544. **Next: `BLOCK_SIZE=256` (storage 64).** | [below](#r-018) |
+| **R-017** | 2026-09-16 23:10 | GLM-5.3-Flash-NVFP4 · `--dummy` | `IMAGE` → `pensive/glm53-flash:nope-sm120-617d0cc` (ported NoPE plugin) | **Failed at backend selection (75 s)** — `--kv-cache-dtype auto` canonicalized to `fp8_e4m3`, rejected by the plugin's dtype list. Plugin registration/override itself proved good. | [below](#r-017) |
+| **R-016** | 2026-09-16 22:55 | GLM-5.3-Flash-NVFP4 · port/build | new derived image, no GPU touched | **`--check` PASSED** — plugin entry points discovered, `FLASHINFER_MLA_SPARSE_SM120` slot override verified, inert without env gate. R-014/R-015 attention block lifted in software. | [below](#r-016) |
 | **R-015** | 2026-09-16 00:27 | GLM-5.3-Flash-NVFP4 · `--dummy` | `IMAGE` → `vllm/vllm-openai:nightly` (0.29.1rc1, flashinfer 0.6.18) | **Failed, identical signature** — `pe_dim must be 64 for fp8_ds_mla`. Public nightly does not fix it; its compiled kernel still carries the assert and its sm_120 selector is unchanged. | [below](#r-015) |
 | **R-014** | 2026-09-15 22:27 | GLM-5.3-Flash-NVFP4 · `--dummy` | first GPU stage for this model | **Failed at KV-cache init** — `pe_dim must be 64 for fp8_ds_mla`. NVFP4 loader + sparse-MLA selection proved good. **Corrected same evening: no flag fixes this — sm_120 has no NoPE sparse-MLA path in this build.** | [below](#r-014) |
 | R-013 | 2026-09-14 13:49 | GLM-5.3-Flash-NVFP4 · acquire | — | Download complete, 44/44 files, 204.5 GB / 190.5 GiB, 49m22s | `GLM-53-FLASH-NVFP4-RECIPE.md` §0 |
@@ -80,6 +85,163 @@ a full entry whenever something failed, surprised you, or moved a number.
 ---
 
 ## Entries
+
+### R-020
+**2026-09-24 — nvidia/GLM-5.3-Flash-NVFP4 · stage `--serve` (real weights)**
+*(opencode session; entry written from in-session evidence — vLLM `/metrics`, `nvidia-smi`, docker
+engine-log lines, and the in-conversation coherence probe. Per user directive the full container log
+was not re-mined: it carries earlier failed attempts.)*
+
+| | |
+|---|---|
+| **Outcome** | **PASSED — first end-to-end real-weights serve of this model on pensive.** READY after 2637 s (~44 min) ZFS load; HTTP 200 on :8092; correctness probe returned correct reasoning (worked out "capital of France = Paris" and was counting word counts — coherent, no silent garbage). Steady-state serving verified during the user's long generation. No host reset, no OOM. |
+| **Duration** | 2637 s to READY (~44 min: 190 GiB ZFS load + engine init); still serving at entry time |
+| **Image** | `pensive/glm53-flash:nope-sm120-617d0cc` |
+| **Host** | driver 580.178.04 matched; RAM 751 GB total (~251 GB used / ~499 GB avail during serve); NUMA 125/251/125/247 GB (all populated); booted 2026-09-23 23:16:19 (uninterrupted through the run); no `iommu=pt` |
+| **GPUs** | ~67 GB used per card; ~95–102 W draw; **power cap did not apply** (300 W limit, no interactive sudo — known non-issue, less fabric margin) |
+| **Capture** | armed, klog actively writing |
+| **Changed vs. last attempt** | ONE step: stage `dummy` (R-019) → `serve` (real 190 GiB weights). All flags identical to R-019: `BLOCK_SIZE=256`, `KV_CACHE_DTYPE=bfloat16`, `ENFORCE_EAGER=1`, `SPARSE_MLA=1`, TP2, 32 GB/wkr offload, ctx 8192, seqs 1, MTP off. |
+
+**Config** — identical to R-019 minus `--load-format dummy`:
+```
+serve /model --tensor-parallel-size 2 --quantization modelopt --served-model-name nvidia/GLM-5.3-Flash-NVFP4
+  --cpu-offload-gb 32 --max-model-len 8192 --max-num-seqs 1 --gpu-memory-utilization 0.90
+  --kv-cache-dtype bfloat16 --block-size 256 --disable-custom-all-reduce --max-parallel-loading-workers 1
+  --host 0.0.0.0 --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser deepseek_r1
+  --enforce-eager
+```
+
+**Read:** deepest stage yet, and the first real-weights pass: 190 GiB ModelOpt-NVFP4 weights loaded
+from ZFS with no trip/OOM/reset (the load event class that reset this host 5× in the DIMM-fault era
+— R-001a). Ported NoPE sparse-MLA + DSA-indexer path executes on real weights; **output is
+coherent** — the "silent garbage" failure mode (MoE input-scale fault 2) did not materialize,
+consistent with the pre-run audit (36,297 serialized `input_scale` tensors + the base image's
+ModelOpt mapping branch). This retires the last "does it actually work on real weights" question;
+what remains open is performance characterization (below) and the Stage-3 levers.
+
+**Measured steady state** (single long generation in flight; docker-log windows 15:52–15:56 +
+`/metrics` + `nvidia-smi`):
+- **~2.4–2.5 tok/s** sustained; mean inter-token latency ~412 ms (2139 s ÷ 5193 tokens)
+- GPUs: 100 % util / 6 % memory-bandwidth util / ~95–102 W of 300 W / 64–66 °C →
+  **NCCL spin-wait signature = comm-bound**, not compute/memory/thermal-bound
+- KV cache 4.5–5.2 % → not KV-bound; SM 2572–2602 MHz (no throttling); MTP off; eager (no CUDA
+  graphs — ported kernel declares CG `NEVER`)
+- Bottleneck rank: (1) TP2 all-reduce over cross-NUMA host bounce (no NVLink,
+  `NCCL_P2P_DISABLE=1`, no `iommu=pt`) — structural floor; (2) eager decode (per-token kernel
+  launch overhead); (3) no MTP spec decode; (4) 32 GB/wkr offload → per-token H2D expert gather
+  (~4.3 GB/tok stream)
+
+**Lesson:** on the same interconnect this box does 20–24 tok/s on Qwen3.8-Flash-Next-FP8 (graphs +
+MTP + 8 GB/wkr) and 2.4 tok/s here — the gap is config levers (CUDA graphs, MTP, offload depth),
+not a hardware regression. And a pre-run input-scale audit correctly predicted the silent-garbage
+fault would not fire on a fully-serialized checkpoint — audit-then-serve beats probe-after-crash
+for the silent-garbage class.
+
+**Next:** Stage 3, one variable — enable MTP:
+`SPEC_CONFIG='{"method":"mtp","num_speculative_tokens":2}'` (arch has 1 nextn layer; the FP8
+sibling crashed at 4, start at 2; expect ~2.5–3× on a comm-bound box per P-J). After that, a
+`VLLM_TORCH_PROFILER_DIR` round to split one decode round into NCCL-wait vs kernel vs H2D-gather
+(settles levers 1–4 without flag roulette).
+
+---
+
+### R-019
+**2026-09-24 00:58 local — nvidia/GLM-5.3-Flash-NVFP4 · stage `--dummy`**
+*(opencode session; launched per user's "let's push"; snapshot via `run-log.sh` at 00:58 while server still up.)*
+
+| | |
+|---|---|
+| **Outcome** | **Passed — server READY after 1537 s (~25.6 min).** HTTP 200 on :8092; `/v1/models` 200; dummy `/v1/completions` round-trips (gibberish output — expected with `--load-format dummy`). Container still running at snapshot time. |
+| **Duration** | still running (exit n/a, OOMKilled=false); READY 1537 s from launch |
+| **Image** | `pensive/glm53-flash:nope-sm120-617d0cc` |
+| **Host** | driver 580.178.04 matched; RAM 751 GB total, 617 GB avail; NUMA nodes 125/251/125/247 GB; booted 2026-09-23 23:16:19; repo 735d6fa |
+| **GPUs** | 0: 67026 MiB, 300 W; 1: 66302 MiB, 300 W — **power cap did not apply** (no interactive sudo; known non-issue, less margin) |
+| **Capture** | armed, klog actively writing throughout |
+| **Changed vs. last attempt** | ONE variable: `BLOCK_SIZE` 16 → 256 (launcher default; exactly R-018's "Next"). `KV_CACHE_DTYPE=bfloat16`, ported image, `ENFORCE_EAGER=1`, `SPARSE_MLA=1` all unchanged from R-018. |
+
+**Config**
+```
+serve /model --tensor-parallel-size 2 --quantization modelopt --served-model-name nvidia/GLM-5.3-Flash-NVFP4
+  --cpu-offload-gb 32 --max-model-len 8192 --max-num-seqs 1 --gpu-memory-utilization 0.90
+  --kv-cache-dtype bfloat16 --block-size 256 --disable-custom-all-reduce --max-parallel-loading-workers 1
+  --host 0.0.0.0 --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser deepseek_r1
+  --load-format dummy --enforce-eager
+```
+
+**Signature**
+```
+(no errors) — benign warnings only: max_parallel_loading_workers ignored (parallel.py:959),
+SymmMemCommunicator sm_120 unsupported (expected). Engine READY; HTTP 200; completion generated.
+```
+
+**Read:** deepest stage of any GLM-5.3 attempt on this box, in order: NCCL init (TP2, PYNCCL) →
+**plugin backend selected** (`glm53_sparse_mla` overriding the `FLASHINFER_MLA_SPARSE_SM120` slot) →
+ModelOpt NVFP4 loader (`FLASHINFER_CUTLASS` MoE backend) → dummy weights loaded (~57 GiB/rank) →
+**KV + kpool caches allocated at block 256** → eager decode warmup → **server up**. This retires
+R-018's DeepGEMM `fp8_fp4_paged_mqa_logits` storage-block assert (block 16 → 2176 via the hybrid
+page-alignment rule → storage 544 ≠ 64): at block 256 (storage 64) the entire NoPE sparse-MLA +
+DSA-indexer forward path executes on sm_120. What this does NOT yet prove: real-weight load and
+output **correctness** (Stage 2 + probe) and decode throughput.
+
+**Lesson:** on hybrid-attention models the KV block size is not just a memory-efficiency knob — it
+feeds `storage_block = block // index_kpool`, which the indexer's logits kernel asserts on, and
+vLLM's hybrid "attention page ≥ mamba page" alignment rule **silently inflates the default**
+(16 → 2176 here). Trace the chain block → storage → kernel assert before trusting any default.
+
+**Next:** Stage 2 — `--serve` real weights (190 GiB ZFS load; §3 gates; note power cap not applied
+without interactive sudo, `drop_caches` needs root). Then a **correctness probe** (arithmetic +
+factual + repeated-token check) before trusting throughput.
+
+---
+
+### R-016
+**2026-09-16 23:10 local — nvidia/GLM-5.3-Flash-NVFP4 · port/build (no GPU touched)**
+*(opencode session; ran alongside the live `qwen38-flash-serve` — CPU-only work throughout.)*
+
+| | |
+|---|---|
+| **Outcome** | **Derived image built + `--check` passed (CPU-only).** No GPU stage attempted (GPUs held by the Qwen serve). |
+| **Changed vs. last attempt** | The serving *image*: stock `:glm53-flash` (no NoPE path, R-014) → `pensive/glm53-flash:nope-sm120-617d0cc` with the ported NoPE sparse-MLA plugin. Everything else unchanged. |
+| **Source** | `Libertai/glm53-flash-vllm-gb10` @ `617d0cc` (Apache-2.0), clean clone at `~/Workspace/vendor/`; Dockerfile `recipe/Dockerfile.glm53-flash-nope-sm120`; kernel built `GLM53_ARCHS=120a` **inside** the base image. |
+| **Host** | unchanged from R-015; powertrip-capture + metrics stack up; serve untouched (re-verified by `docker ps` during the session). |
+
+**Read (what `--check` proves without a GPU):** `Glm5Next*` archs + FlashInfer 0.6.17 + modelopt
+loader intact on the derived image; both plugin entry points discoverable via
+`vllm.general_plugins` (so vLLM's `load_general_plugins()` will arm them in every worker); the
+backend override resolves `FLASHINFER_MLA_SPARSE_SM120` → `glm53_sparse_mla.backend` **only** with
+`VLLM_GLM53_CUDA_SPARSE_MLA=1`, and is inert without it; the AOT `_C*.so` loads with no driver
+present. What it does NOT prove: anything about GPU execution — kernel numerics, eager decode
+speed, offload interaction.
+
+**Corrections made during this port (P9/P10):**
+1. LibertAI's README quickstart still says `VLLM_GLM53_MOE_INPUT_SCALE=1.0`; their *own pinned
+   commit* retracts it (1.0 = 632× the calibrated median → e4m3 block-scale underflow →
+   intermittent repetition). We leave the env unset: our nvidia checkpoint is fully serialised
+   (36,297 inline `input_scale` tensors, sampled nonzero) and the base image's `routed_experts.py`
+   has the ModelOpt-NVFP4 mapping branch that loads them. The "0.0 / `torch.empty`" story is a
+   *weight-only-checkpoint* property, not universal.
+2. Their README's capability table (fp8 KV, `UNIFORM_BATCH` graphs) contradicts the shipped
+   `backend.py` (bf16-only, `NEVER`). Code wins: launcher defaults are `KV_CACHE_DTYPE=bfloat16`
+   (settled by R-017), `ENFORCE_EAGER=1`.
+
+**Incidents during the build (both self-inflicted, both recorded as lessons):**
+- `rm -rf /k` on a bind-mounted clone path inside a probe container deleted the host-side `kernel/`
+  tree (EBUSY protects the mountpoint only). Recovered with `git checkout -- kernel`.
+- First image build failed because the in-image *source tree* shadowed the installed package for
+  any process with that cwd, and the package's dev-JIT import fallback probes for a GPU. Fixed in
+  the Dockerfile (install → delete source → verify from `/`). Also: torch 2.13 `CUDAExtension`
+  metadata step imports the parent package — same failure channel.
+
+**Lesson:** a "BLOCKED on hardware/runtime gap" verdict can expire the day someone publishes an
+Apache-2.0 plugin that overrides the backend-enum slot — audit vendor-fork *plugins* (entry points,
+not images) before retiring a model; P12 forbids their container, not their method.
+
+**Next:** when the GPUs free — `bash recipe/serve-glm-53-flash-nvfp4.sh --dummy`
+(bf16 KV, eager, plugin gated on), then `--serve` with the §3 gates, then a **correctness probe**
+(arithmetic + factual prompts, repeated-token check) before trusting throughput — this whole saga
+began with silent garbage, not crashes.
+
+---
 
 ### R-015
 **2026-09-16 00:27 local — nvidia/GLM-5.3-Flash-NVFP4 · stage `--dummy`**

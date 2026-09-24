@@ -57,6 +57,19 @@ fork the launcher (`serve-qwen38-flash-next-fp8-<variant>.sh`) instead of mutati
 - **Ruled out — do not re-attempt:** TP2→PP2 (vLLM PLE guard, KNOWLEDGE §2; and batch-1 bubble
   kills it anyway, P-I). CPU side is not a bottleneck (~3 cores of 56).
 
+### A5. Serve GLM-5.3-Flash-NVFP4 on the ported NoPE image — ✅ SERVED 2026-09-24 (RUN-LOG R-020)
+Blocker R-014/R-015 lifted in software: `pensive/glm53-flash:nope-sm120-617d0cc` (vendor-fork base +
+Apache-2.0 `glm53_sparse_mla` plugin, RUN-LOG R-016, recipe §0). `--check` green. Launcher defaults
+set to the shipped code's limits: `KV_CACHE_DTYPE=bfloat16` (never `auto` — R-017), `BLOCK_SIZE=256`
+(R-018), `ENFORCE_EAGER=1` (CG `NEVER`), plugin gate on. Sequence executed: `--dummy` **PASSED**
+(R-019, READY 1537 s) → `--serve` **PASSED** (R-020, READY 2637 s; correctness probe: coherent
+output, no silent garbage) → measured steady **~2.4–2.5 tok/s, comm-bound** (TP2 host-bounce +
+eager + no MTP + 32 GB/wkr offload).
+- **Open / next:** stage-3 increments — **MTP first** (`SPEC_CONFIG` `num_speculative_tokens=2`,
+  expect ~2.5–3× on a comm-bound box per P-J), then a `VLLM_TORCH_PROFILER_DIR` round to split one
+  decode round (NCCL-wait vs kernel vs H2D-gather); fp8-KV and CUDA-graph support only after the
+  plugin's README-vs-code claims are tested, one variable each.
+
 ---
 
 ## B. Stability / power-trip — STASHED (hardware debug)
