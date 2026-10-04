@@ -26,6 +26,12 @@ direct channels**, which hang on this cross-NUMA/no-NVLink link — `init_proces
 - Result: used TP2 successfully on `Qwen3.8-Flash-Next-NVFP4` (got past distributed init to weight-load).
   See `power-trip-instances.md` Instance 2 (the run then died on the memory power-trip, not NCCL).
 - Confirmed also: SymmMemCommunicator unavailable (sm_120/Blackwell); vLLM falls back to CUSTOM/PYNCCL all-reduce.
+- **Deeper mechanism found 2026-09-24** (KNOWLEDGE §1, `evidence/p2p-probe-2026-09-24/`): the hang is
+  a *symptom*, not the fault. Peer writes on this box are **silently discarded** — `canAccessPeer`
+  returns True, `cudaMemcpyPeer` returns success, and the data arrives as all zeros. NCCL hangs only
+  because the flag it spins on is one of those discarded writes; it is the **loud** failure mode.
+  That makes `NCCL_P2P_DISABLE=1` a **correctness** guard, not a perf workaround — never lift it to
+  test throughput. The migration path noted above is now tracked as A4.5.
 
 ### A3. Keep debugging GLM-5.2 NVFP4 — PENDING
 Get past the SGLang NVFP4 fused-MoE loader shape mismatch (`3072 vs 6144` in `_load_w13`) and/or find a working vLLM sparse-MLA backend on Blackwell.
@@ -51,11 +57,87 @@ fork the launcher (`serve-qwen38-flash-next-fp8-<variant>.sh`) instead of mutati
 - **A4.3 · Newer-vLLM probe.** Does a current build get CUSTOM all-reduce or symm-mem working on
   sm_120 (both fail in today's build — §1)? Retest `SPEC_TOKENS=5` too (§3: ceiling was image-specific).
   `--check` → `--dummy` first; retire the whole path fast if the selector already says no (R-015 rule).
-- **A4.4 · `iommu=pt` host change — biggest lever, needs USER decision + reboot window** (§1).
-  GRUB flag → reboot → `p2pBandwidthLatencyTest`/`nccl-tests` → if P2P now clean, re-run proven config
-  without `NCCL_P2P_DISABLE=1` (prove on dummy first, P7). Est. 1.5–2.5× decode if it works.
+- **A4.4 · `iommu=pt` host change — needs USER decision + reboot window** (§1). Demoted
+  2026-09-24, then **partially reinstated the same day** by the data-integrity probe (KNOWLEDGE §1 +
+  `evidence/p2p-probe-2026-09-24/`). The demotion assumed P2P was *structurally* impossible, but that
+  was **inferred from topology and never tested** — `iommu=pt` has still never been tried on this
+  host. What the probe did establish: peer writes are **silently discarded** (all zeros, no error at
+  any layer), AMD-Vi is in `Translated` mode, and the **root cause was not reached** (ACS / AtomicOp
+  bits need root). So this is **untested lever (a)**, not ruled out.
+  - **Cheap pre-step, no reboot:** `sudo lspci -vvv -s 00:01.1 | grep -E 'ACSCap|ACSCtl|AtomicOp'`
+    (and `c0:03.1`). An `ACSCtl: … RequestRedirect+` / `UpstreamForwarding+` would explain the dropped
+    writes and is what justifies booking the reboot window.
+  - Then: GRUB flag → reboot → `journalctl -k | grep 'Default domain type'` (expect `Passthrough`) →
+    re-run `evidence/p2p-probe-2026-09-24/` and **gate on payload, not bandwidth**.
+  - **Ceiling if it works:** fallback measures **8.0 GB/s** busbw; a working P2P path is bounded by
+    the Gen3 x16 link at ~13–14 GB/s → **~1.7× on comm bandwidth**, and end-to-end decode gain is a
+    *fraction* of that since comm is not the whole round. So the old 1.5–2.5× estimate was optimistic
+    as a decode figure but not absurd as a comm one — treat it as ~1.7× comm, unquantified decode.
+    ⚠️ Do **not** cite the probe's 13.89 GB/s peer-copy figure as evidence of a working path: that
+    measurement was dropped writes moving zero bytes (KNOWLEDGE §1).
+
+- **A4.5 · Re-slot both GPUs onto one root complex — needs USER decision + physical access.**
+  `[new 2026-09-24]` Untested lever (b). Moving both GPUs under one root complex would remove the
+  Infinity-Fabric crossing entirely. **⚠️ CORRECTED 2026-09-25 — this is not a free-slot move.** The
+  first draft of this item claimed `0000:c0` "exposes five x16 root ports (`c1`–`c5`)"; it conflated
+  *PCIe root ports* with *available expansion slots*. All five are populated by onboard devices:
+  `c1`/`c2` = Intel I226-V NICs, `c3`/`c4` = NVMe, `c5` = GPU1. Root complex `0000:00` likewise
+  exposes only `00:01.1` (GPU0). **So there may be no pair of physical x16 slots sharing a root
+  complex on this board at all** — that is a board-layout question, not a configuration one.
+  **Do first (free, no downtime):** read the H12D-8D manual / block diagram and establish whether any
+  two x16 slots share a root complex. If not, this lever is dead and lever (a) + A4.6 are all that
+  remain. If yes: move → `nvidia-smi topo -m` (expect `PHB`/`NODE` instead of `SYS`) → re-run the
+  probe, gating on payload.
+
+- **A4.6 · Lift the PCIe Gen3 cap — BIOS, needs USER decision + reboot window.** `[measured
+  2026-09-24]` Both GPU root ports advertise `max_link_speed` **8.0 GT/s** while the cards advertise
+  32.0 GT/s and EPYC Milan is Gen4-capable — platform-level (BIOS setting or slot/riser wiring),
+  not GPU silicon (KNOWLEDGE §1). This throttles the host-bounced collective path **and** H2D offload
+  — both things every TP2 decode round depends on — so it **pays off even if P2P is never revived**,
+  which makes it the best expected-value of the three host changes. Look for a "PCIe Link Speed" /
+  "Gen Speed" option on the GPU slots; measure `nccl-tests` all_reduce_perf + an H2D benchmark
+  before/after. Resizable BAR is already fully on (BAR1 = 64 GB both cards) — not a factor.
 - **Ruled out — do not re-attempt:** TP2→PP2 (vLLM PLE guard, KNOWLEDGE §2; and batch-1 bubble
   kills it anyway, P-I). CPU side is not a bottleneck (~3 cores of 56).
+
+### A6. Serve GLM-5.3-Flash (zai FP8) via KTransformers CPU-experts — ✅ STAGE 2 SERVING @ 5.81 tok/s, ctx 501025, long-prompt path proven (R-031, 2026-10-01)
+**Why:** R-020's 2.4–2.5 tok/s is structurally comm-bound (TP2 host-bounce collectives + per-token
+H2D expert stream). KTransformers moves the 305 GB of routed experts into host RAM where they
+**execute on the CPU** (kt-kernel, AVX2 variant — this EPYC has no AVX-512/AMX); GPU0 does
+attention/dense/shared; TP1 → zero all-reduces. P10 estimate: 3–12 tok/s.
+- **Done:** image `pensive/glm53-kt:latest` (kt-kernel + sglang-kt 0.7.0.post4 from official PyPI
+  wheels, `recipe/Dockerfile.glm53-kt`); launcher `recipe/serve-glm-53-flash-kt.sh`
+  (`--check` → `--smoke` → `--serve`, port 8093); recipe `GLM-53-FLASH-KT-RECIPE.md`;
+  `--check` PASSED (R-022).
+  - **AVX2 FP8 expert path: RESOLVED** — all 42 layers create `AVX2_FP8_MOE_TP 0..3` pools
+    (R-024/025/026); the tutorial's "AVX-512" line was conservative.
+  - **sm_120 DSA/KDA attention: RESOLVED at init** — sglang-kt logs `GPU profile=blackwell_fp8`,
+    `NSA dispatcher=trtllm … on SM86/SM89/SM120`, `arch=compute_120a`.
+  - **Image toolchain: RESOLVED** — the `-base` image lacked `cc` (R-024), `python3-dev`/`Python.h`
+    (R-025) and `nvcc` (R-026); each died at CUDA-graph capture JIT. Now `devel` base +
+    `build-essential` + `python3-dev`.
+- **Done (R-027):** `--smoke` passed — READY ~27 min, correctness probes pass (arithmetic + factual),
+  **5.81 tok/s steady** (2.4× vLLM baseline).
+- **Done (R-028):** concurrency sweep (N=1/2/4) — per-request 5.81→3.23→1.76 tok/s, aggregate
+  5.83→6.48→7.05 tok/s. Sublinear: shared DRAM expert-stream bound; concurrency not the lever.
+  Container left at `MAX_RUNNING_REQUESTS=4`.
+- **Done (R-029):** Stage 2 `--serve` at CTX=501025 (tutorial-validated full context; ONE variable
+  vs R-028). Fixed user's client `400 Bad Request` (was the 8192 ctx cap on max_tokens). READY
+  ~21 min; probes pass; `max_model_len` 501025 confirmed.
+- **Done (R-030→R-031):** A user's "very long prompt" crashed the R-029 server (exit 137, host fine)
+  with `RuntimeError: KT shared-memory NUMA setup failed`. Root cause was NOT NUMA — the
+  layerwise-prefill CPU-expert path lazily dlopens `libnuma.so.1`, which the image lacked.
+  Fix: `+libnuma1` in `Dockerfile.glm53-kt` (image now `3cf104f7ddcb`) + a 5 s in-image
+  `ctypes.CDLL("libnuma.so.1")` gate in `--check`. Regression-tested the exact crash path:
+  3442-token prompt → HTTP 200, clean prefill+decode (prefill ~10.6 tok/s first-use). A second 400
+  class (client `reasoning_effort:"max"`) documented in KNOWLEDGE §5 — client must use low/medium/high.
+- **Open:** GPU-expert residency for short prompts (raise `KT_GPU_PREFILL_THRESHOLD`), threadpool
+  sweep (`KT_THREADPOOL` 4→8/16, `KT_CPUINFER` 56→48), MOE_INT8 A/B.
+- **Fallbacks:** `KT_METHOD=MOE_INT8` (AMD-BLIS source build + `convert_cpu_weights.py
+  --quant-method moe_int8`; P12-clean) → `KT_METHOD=LLAMAFILE` + unsloth GGUF (**third-party quant —
+  explicit user OK required, P12**).
+- **P12 exception on record:** user-directed 2026-09-30 (third-party runtime, official wheels, our
+  image, vendor weights). Provenance in recipe §0 + KNOWLEDGE.md §2.
 
 ### A5. Serve GLM-5.3-Flash-NVFP4 on the ported NoPE image — ✅ SERVED 2026-09-24 (RUN-LOG R-020)
 Blocker R-014/R-015 lifted in software: `pensive/glm53-flash:nope-sm120-617d0cc` (vendor-fork base +

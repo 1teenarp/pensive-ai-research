@@ -1,0 +1,48 @@
+# pensive/glm53-kt — KTransformers + sglang-kt for GLM-5.3-Flash CPU-expert serving
+# Provenance: kvcache-ai/KTransformers v0.7.0.post4 (Apache-2.0), official PyPI wheels.
+# P12 note: our own image from official wheels; not a third-party docker image.
+# User-directed 2026-09-30 (user explicitly approved KT path for GLM-5.3-Flash).
+# Build: docker build -f recipe/Dockerfile.glm53-kt -t pensive/glm53-kt:latest recipe/
+# R-026 (2026-10-01): base -base -> -devel. sgl_kernel JIT-compiles CUDA kernels (nvcc) during
+# CUDA-graph capture; the -base image ships no toolkit. -devel adds nvcc + headers (~11 GB).
+FROM nvidia/cuda:13.0.0-devel-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-pip python3-venv \
+    ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /opt/kt-venv
+ENV PATH="/opt/kt-venv/bin:$PATH"
+
+RUN pip install --upgrade pip && \
+    pip install "ktransformers[sglang]==0.7.0.post4"
+
+RUN python3 -c "\
+import kt_kernel; \
+print('kt-kernel', kt_kernel.__version__, 'variant:', kt_kernel.__cpu_variant__); \
+import sglang; print('sglang', sglang.__version__); \
+print('OK')"
+
+# R-024 (2026-10-01): CUDA-graph capture JITs a triton kernel (KDA causal_conv1d_update), and
+# triton's driver init compiles a C helper module -> the base image (no cc) crashed the smoke run.
+# R-025: gcc was present but the same JIT died with exit 1 — triton's cuda_utils.c includes
+# <Python.h>, which needs python3-dev (/usr/include/python3.12). Added here, same layer.
+# R-030 (2026-10-01): the layerwise-prefill CPU-expert path (first prompt > 2048 tokens) lazily
+# dlopen's libnuma.so.1 for NUMA-aware shared-memory buffers; the image had no libnuma1, so the
+# first long-prompt request crashed the server (exit 137, "KT shared-memory NUMA setup failed").
+# build-essential + python3-dev + libnuma1 are a separate layer on purpose: keeps the ~16 GB
+# ktransformers pip layer cached across toolchain fixes. ptxas is not needed — the triton wheel
+# ships its own.
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential python3-dev libnuma1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && cc --version | head -1 \
+    && test -f /usr/include/python3.12/Python.h \
+    && ldconfig -p | grep -q libnuma.so.1
+
+CMD ["python3", "-m", "sglang.launch_server", "--help"]

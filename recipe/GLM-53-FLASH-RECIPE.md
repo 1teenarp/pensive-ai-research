@@ -214,7 +214,11 @@ gates, nothing learned is lost (capture + CE deltas tell us the stage it died at
 
 ### Fallbacks if vLLM 0.29 sparse-MLA still fails on sm_120
 - **KTransformers** (model card links a GLM-5.3-Flash tutorial; CPU-expert/GPU-attention split — best
-  match for 1 TiB RAM; untested on Blackwell here).
+  match for this box's 751 GiB RAM). **Pursued 2026-09-30 (user-directed):** image + launcher +
+  recipe now live — `recipe/GLM-53-FLASH-KT-RECIPE.md` / `recipe/serve-glm-53-flash-kt.sh` /
+  `recipe/Dockerfile.glm53-kt` (RUN-LOG R-022: build + `--check` passed; AVX2-only CPU confirmed;
+  Stage 1 `--smoke` pending go/no-go). Note this box's EPYC 7663 is AVX2-only (no AVX-512/AMX), so
+  the tutorial's "AVX-512 FP8 CPU expert kernel" is not the primary path here.
 - **llama.cpp GGUF** (Unsloth guide; recent llama.cpp + `--n-cpu-moe`-style expert-on-CPU split;
   `llamacpp:*` images exist but would need a rebuild).
 - **nvidia/GLM-5.3-Flash-NVFP4** (NVIDIA ModelOpt NVFP4 variant, ~half the bytes/token vs this FP8

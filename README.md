@@ -259,6 +259,7 @@ host; it isn't documented in this repo yet.
 | [`RESUME-NOTE.md`](RESUME-NOTE.md) | "Bring the server back up" quick note + standing decisions. |
 | [`PROJECT-TODOS.md`](PROJECT-TODOS.md) | Open and closed work, split serving vs. stability. |
 | [`evidence/`](evidence/) | Raw traces: telemetry CSVs, kernel and serve logs, reset reasons. |
+| [`extras/`](extras/) | Stand-alone research memos outside the core docs (e.g. the 2×DGX Spark GLM-5.3-Flash stack compared against pensive). |
 
 ---
 
